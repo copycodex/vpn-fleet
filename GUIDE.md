@@ -426,7 +426,7 @@ Then, in order:
 | 1. First contact | `make first-contact NODE=<node>` | accepts the host key by TOFU, changes the issued password, installs the fleet key, proves the login with it and clears the record from the map |
 | 2. Bootstrap | `make bootstrap NODE=<node> FROM=<user>@<port>` | preflight, then `devops`, the SSH move to the chosen port, root and password login disabled |
 | 3. The node | `make site NODE=<node>` | hardening, a firewall built from the declared transports, Xray and sing-box |
-| 4. Clients | `make add-client NAME=<client>`, `make export` | UUID into the ciphertext, config, link and QR |
+| 4. Clients | `make add-client NODE=<node> NAME=<client>`, `make export NODE=<node>` | UUID into the ciphertext, config, link and QR |
 
 Bootstrap's `FROM` is the door the first contact left behind: its record in the
 map is deleted on success, so the user and the port are named by the call. The
@@ -434,4 +434,5 @@ preflight checks four things before any network action: the first contact is
 done, our key is in the admin list, the host key for the new port is known or
 will be recorded, and that port is not already taken on the node itself.
 
-Steps 1–4 are written up in the following sections of this guide.
+Run `make help` for the available targets, or `wizard/wizard.py` to walk through
+the steps with local readiness checks.

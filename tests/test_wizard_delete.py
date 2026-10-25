@@ -180,16 +180,25 @@ def test_delete_plan_lists_safe_order(tmp_path, monkeypatch):
 
 
 
-def test_deletion_marker_is_visible_in_repository_status(tmp_path: Path):
+@pytest.mark.parametrize("ignore_file, ignored", [
+    (ROOT / ".gitignore", not (ROOT / "publication/overlay/.gitignore").exists()),
+    *([(ROOT / "publication/overlay/.gitignore", True)]
+      if (ROOT / "publication/overlay/.gitignore").exists() else []),
+])
+def test_deletion_marker_repository_status(tmp_path: Path, ignore_file: Path, ignored: bool):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    (repo / ".gitignore").write_bytes((ROOT / ".gitignore").read_bytes())
+    (repo / ".gitignore").write_bytes(ignore_file.read_bytes())
     write_marker(repo / "private", "one", "192.0.2.41")
     status = subprocess.run(["git", "-C", str(repo), "status", "--porcelain",
                              "--untracked-files=all"], capture_output=True, text=True,
                             check=True)
-    assert "?? private/.wizard-deletions/one.json" in status.stdout.splitlines()
+    marker = "private/.wizard-deletions/one.json"
+    assert (f"?? {marker}" in status.stdout.splitlines()) is not ignored
+    check = subprocess.run(["git", "-C", str(repo), "check-ignore", "-q", marker],
+                           check=False)
+    assert (check.returncode == 0) is ignored
 
 
 def test_delete_prefix_collision_does_not_mark_node(tmp_path: Path):

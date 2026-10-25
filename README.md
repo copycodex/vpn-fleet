@@ -21,6 +21,7 @@ Use a Linux control host and a VPS running Ubuntu. Install the tools listed in `
 
 ```bash
 wizard/deps.sh
+source ~/.venv/vpn-fleet/bin/activate
 wizard/keys.sh
 wizard/private_tree.py
 wizard/wizard.py
@@ -28,7 +29,7 @@ wizard/wizard.py
 
 Create your own `private/` tree from the templates. It holds your inventory, host keys, public administrator keys, SOPS configuration, and encrypted secrets. No operational `private/` tree is included here. Keep the age identity and SSH private key outside the repository.
 
-For individual commands, the usual sequence is `make new-server`, `make first-contact NODE=<node>`, `make bootstrap NODE=<node> FROM=<user>@<port>`, `make site NODE=<node>`, and `make export NODE=<node>`. Read the expected result and prerequisites for each step in the [English guide](GUIDE.md) or [Russian guide](GUIDE_RU.md) before running it. The wizard walks through the same sequence.
+For individual commands, the usual sequence is `make new-server`, `make first-contact NODE=<node>`, `make bootstrap NODE=<node> FROM=<user>@<port>`, `make site NODE=<node>`, and `make export NODE=<node>`. See the [English guide](GUIDE.md) or [Russian guide](GUIDE_RU.md) for the sequence and prerequisites. The wizard walks through the same steps and checks local readiness.
 
 `make test` runs local tests and configuration checks. Deployment and client switching change live network state; perform those steps from a session where you can recover access.
 

@@ -42,6 +42,8 @@ from common import (  # noqa: E402
     set_step,
     warn,
 )
+sys.path.insert(0, str(ROOT / "scripts"))
+from secrets_lock import secrets_lock  # noqa: E402
 
 PLACEHOLDER = "age1REPLACE_WITH_YOUR_OWN_RECIPIENT"
 RECIPIENT_RE = re.compile(r"age1[0-9a-z]{50,}")
@@ -180,10 +182,6 @@ def ensure_ssh_keys(private: Path, fleet: str, public_key: str) -> None:
 
 def ensure_first_entry(private: Path, config: Path) -> str | None:
     target = private / "inventories" / "first-entry.sops.yml"
-    if target.exists():
-        say(f"{target}: есть")
-        return None
-
     sample = ROOT / "inventories" / "first-entry.sops.yml.example"
     if not sample.is_file():
         return f"нет публичного образца {sample}"
@@ -195,10 +193,15 @@ def ensure_first_entry(private: Path, config: Path) -> str | None:
         "# ровно поле password.",
         1,
     )
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
-
-    from secrets_lock import secrets_lock
+    created = not target.exists()
+    if created:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    elif target.read_text(encoding="utf-8") != text:
+        say(f"{target}: есть")
+        return None
+    else:
+        say(f"{target}: найден незашифрованный образец, повторяю шифрование")
 
     with secrets_lock(target):
         result = subprocess.run(
@@ -208,8 +211,10 @@ def ensure_first_entry(private: Path, config: Path) -> str | None:
             check=False,
         )
     if result.returncode != 0:
-        target.unlink(missing_ok=True)
-        return f"sops не зашифровал {target}; файл не оставлен"
+        if created:
+            target.unlink(missing_ok=True)
+            return f"sops не зашифровал {target}; файл не оставлен"
+        return f"sops не зашифровал {target}; образец оставлен для повторного запуска"
     say(f"создана пустая карта первого входа: {target}")
     return None
 

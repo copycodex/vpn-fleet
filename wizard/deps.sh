@@ -228,4 +228,5 @@ step_venv
 verify
 
 echo
-say "шаг 0 готов. Дальше — ключи установки: wizard/keys.sh"
+say "шаг 0 готов. В этом терминале выполни: source $VENV_DIR/bin/activate"
+say "Дальше — ключи установки: wizard/keys.sh"
