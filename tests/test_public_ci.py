@@ -34,6 +34,29 @@ def test_public_workflow_scans_coordinates_and_all_shell_scripts():
         assert "self-hosted" not in runners
 
 
+def test_public_workflow_scans_repository_files_only():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    job = workflow["jobs"]["validate"]
+    steps = job["steps"]
+    named = {step["name"]: step for step in steps if "name" in step}
+
+    assert job["env"]["ANSIBLE_COLLECTIONS_PATH"] == "/tmp/ansible-collections"
+    assert 'ansible-galaxy collection install -r requirements.yml -p "$ANSIBLE_COLLECTIONS_PATH"' in named["Ansible and YAML lint"]["run"]
+    assert named["Scan secrets"]["run"].splitlines()[-1].strip() == (
+        "/tmp/gitleaks git . --no-banner --redact --exit-code 1"
+    )
+    assert named["Scan coordinates"]["run"].strip() == "scripts/scan-coordinates.sh"
+
+    checkout = next(i for i, step in enumerate(steps) if step.get("uses", "").startswith("actions/checkout@"))
+    assert steps[checkout + 1]["run"].strip() == (
+        'git config --system --add safe.directory "$GITHUB_WORKSPACE"'
+    )
+    public_ignore = ROOT / "publication/overlay/.gitignore"
+    if not public_ignore.exists():
+        public_ignore = ROOT / ".gitignore"
+    assert ".ansible/" in public_ignore.read_text(encoding="utf-8").splitlines()
+
+
 def test_container_jobs_run_with_bash():
     workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
     for job in workflow["jobs"].values():

@@ -41,7 +41,7 @@ clients/*
 
 # Ansible
 *.retry
-/.ansible/
+.ansible/
 __pycache__/
 *.pyc
 .ansible_cache/
