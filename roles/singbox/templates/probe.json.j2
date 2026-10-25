@@ -1,0 +1,49 @@
+{
+  "log": { "level": "warn" },
+  "inbounds": [
+    {
+      "type": "socks",
+      "tag": "probe-in",
+      "listen": "127.0.0.1",
+      "listen_port": 19080
+    }
+  ],
+  "outbounds": [
+{% if probe_transport == 'vless' %}
+    {
+      "type": "vless",
+      "tag": "probe-out",
+      "server": "{{ ansible_host }}",
+      "server_port": {{ singbox_reality_port }},
+      "uuid": "{{ export_client.uuid }}",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "{{ singbox_vless_tls_server_name if singbox_vless_security == 'tls' else singbox_reality_sni }}"{% if singbox_vless_security == 'reality' %},
+        "utls": { "enabled": true, "fingerprint": "{{ singbox_reality_fingerprints[singbox_reality_server] }}" },
+        "reality": {
+          "enabled": true,
+          "public_key": "{{ node_reality_public_key }}",
+          "short_id": "{{ node_reality_short_id }}"
+        }
+{% endif %}
+      }
+    }
+{% elif probe_transport == 'hy2' %}
+    {
+      "type": "hysteria2",
+      "tag": "probe-out",
+      "server": "{{ ansible_host }}",
+      "server_port": {{ singbox_hy2_port }},
+      "password": "{{ node_hy2_password }}",
+      "tls": {
+        "enabled": true,
+        "server_name": "{{ singbox_hy2_sni }}",
+        "certificate_public_key_sha256": ["{{ node_hy2_certificate_public_key_sha256 }}"],
+        "alpn": ["h3"]
+      }
+    }
+{% endif %}
+  ],
+  "route": { "final": "probe-out" }
+}

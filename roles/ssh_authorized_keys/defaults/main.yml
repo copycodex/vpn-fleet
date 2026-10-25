@@ -1,0 +1,15 @@
+---
+# Defaults for ssh_authorized_keys role.
+# Override ssh_authorized_keys_devops in group_vars to actually add keys.
+#
+# Entry format:
+#   - name: "human-readable id (logged as comment in authorized_keys)"
+#     pubkey: "ssh-... AAAA... user@host"
+#
+# To revoke: remove the entry from group_vars and run the role. The local
+# vpn-fleet copy is authoritative by default.
+
+ssh_authorized_keys_user: devops
+ssh_authorized_keys_devops: []
+ssh_authorized_keys_node_extra: []
+ssh_authorized_keys_exclusive: true

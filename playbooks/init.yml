@@ -1,7 +1,0 @@
-- name: Bootstrap server (root + password)
-  hosts: bootstrap
-  gather_facts: yes
-  become: yes
-  roles:
-    - role: init
-      tags: [init]

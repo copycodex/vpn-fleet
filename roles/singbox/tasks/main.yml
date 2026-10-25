@@ -1,0 +1,953 @@
+---
+# Native (no Docker). Имя ноды с дефисом → санитизация '-'→'_' в именах sops-переменных.
+
+- name: Загрузить per-node секреты
+  ansible.builtin.include_tasks: secrets_map.yml
+
+- name: Assert — transport mode и обязательные секреты заданы
+  ansible.builtin.assert:
+    that:
+      - singbox_vless_security in ['reality', 'tls']
+      - singbox_reality_server in ['xray', 'singbox']
+      - singbox_vless_security != 'tls' or singbox_reality_server == 'singbox'
+      - singbox_reality_server in singbox_reality_fingerprints
+      - node_clients | length > 0
+      - singbox_vless_security != 'reality' or node_reality_private_key | length > 0
+      - singbox_vless_security != 'tls' or singbox_vless_tls_server_name | length > 0
+      - not singbox_hy2_enabled or node_hy2_password | length >= 32
+      - >-
+        not singbox_hy2_enabled or
+        node_hy2_password not in (node_clients | map(attribute='uuid') | list)
+      - >-
+        not singbox_hy2_enabled or
+        node_hy2_certificate is search('^-----BEGIN CERTIFICATE-----')
+      - >-
+        not singbox_hy2_enabled or
+        node_hy2_key is search('^-----BEGIN (EC |)PRIVATE KEY-----')
+      - >-
+        not singbox_hy2_enabled or
+        node_hy2_certificate_public_key_sha256 is
+        match('^[A-Za-z0-9+/]{43}=$')
+    fail_msg: "Некорректный VLESS transport mode либо отсутствуют обязательные данные."
+  no_log: true
+
+- name: Проверить установленную версию sing-box
+  ansible.builtin.command: "{{ singbox_bin }} version"
+  register: _singbox_installed
+  failed_when: false
+  changed_when: false
+
+- name: Извлечь точную установленную версию sing-box
+  ansible.builtin.set_fact:
+    _singbox_installed_versions: >-
+      {{ (_singbox_installed.stdout | default('')) |
+         regex_findall('(?m)^sing-box version ([0-9]+(?:\.[0-9]+){2})$') }}
+  changed_when: false
+
+- name: Проверить установленную версию Xray
+  ansible.builtin.command: "{{ xray_bin }} version"
+  register: _xray_installed
+  failed_when: false
+  changed_when: false
+  when: singbox_vless_security == 'reality' and singbox_reality_server == 'xray'
+
+- name: Извлечь точную установленную версию Xray
+  ansible.builtin.set_fact:
+    _xray_installed_versions: >-
+      {{ (_xray_installed.stdout | default('')) |
+         regex_findall('(?m)^Xray ([0-9]+(?:\.[0-9]+){2}) ') }}
+  changed_when: false
+  when: singbox_vless_security == 'reality' and singbox_reality_server == 'xray'
+
+- name: Создать системную группу sing-box
+  ansible.builtin.group:
+    name: "{{ singbox_group }}"
+    system: true
+    state: present
+
+- name: Создать непривилегированного пользователя sing-box
+  ansible.builtin.user:
+    name: "{{ singbox_user }}"
+    group: "{{ singbox_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+    state: present
+
+- name: Создать системную группу Xray
+  ansible.builtin.group:
+    name: "{{ xray_group }}"
+    system: true
+    state: present
+  when: singbox_vless_security == 'reality' and singbox_reality_server == 'xray'
+
+- name: Создать непривилегированного пользователя Xray
+  ansible.builtin.user:
+    name: "{{ xray_user }}"
+    group: "{{ xray_group }}"
+    system: true
+    shell: /usr/sbin/nologin
+    create_home: false
+    state: present
+  when: singbox_vless_security == 'reality' and singbox_reality_server == 'xray'
+
+- name: Каталог конфига
+  ansible.builtin.file:
+    path: "{{ singbox_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ singbox_group }}"
+    mode: "0750"
+
+- name: Каталог конфига Xray
+  ansible.builtin.file:
+    path: "{{ xray_config_dir }}"
+    state: directory
+    owner: root
+    group: "{{ xray_group }}"
+    mode: "0750"
+  when: singbox_vless_security == 'reality' and singbox_reality_server == 'xray'
+
+- name: Установить TLS-идентичность Hysteria2 из SOPS
+  ansible.builtin.copy:
+    content: "{{ item.content }}"
+    dest: "{{ item.path }}"
+    owner: root
+    group: "{{ item.group }}"
+    mode: "{{ item.mode }}"
+  loop:
+    - content: "{{ node_hy2_key }}"
+      path: "{{ singbox_config_dir }}/hy2.key"
+      group: "{{ singbox_group }}"
+      mode: "0640"
+    - content: "{{ node_hy2_certificate }}"
+      path: "{{ singbox_config_dir }}/hy2.crt"
+      group: root
+      mode: "0644"
+  loop_control:
+    label: "{{ item.path }}"
+  when: singbox_hy2_enabled
+  no_log: true
+  notify: restart singbox
+
+- name: Установить публичный TLS-сертификат VLESS
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    remote_src: true
+    owner: root
+    group: "{{ singbox_group }}"
+    mode: "0640"
+  loop:
+    - src: "{{ singbox_vless_tls_source_dir }}/fullchain.pem"
+      dest: "{{ singbox_vless_tls_certificate_path }}"
+    - src: "{{ singbox_vless_tls_source_dir }}/privkey.pem"
+      dest: "{{ singbox_vless_tls_key_path }}"
+  loop_control:
+    label: "{{ item.dest }}"
+  when: singbox_vless_security == 'tls'
+  notify: restart singbox
+
+- name: Установить deploy hook обновления VLESS-сертификата
+  ansible.builtin.template:
+    src: renew-vless-cert.sh.j2
+    dest: /etc/letsencrypt/renewal-hooks/deploy/singbox-vless-cert
+    owner: root
+    group: root
+    mode: "0700"
+  when: singbox_vless_security == 'tls'
+
+- name: Проверить публичный TLS-сертификат VLESS
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop:
+    - "{{ singbox_vless_tls_certificate_path }}"
+    - "{{ singbox_vless_tls_key_path }}"
+  register: _vless_tls_files
+  when: singbox_vless_security == 'tls'
+
+- name: Assert — TLS-сертификат VLESS установлен
+  ansible.builtin.assert:
+    that:
+      - _vless_tls_files.results | map(attribute='stat.exists') | min
+    fail_msg: >-
+      Установи сертификат и ключ VLESS/TLS до deploy:
+      {{ singbox_vless_tls_certificate_path }}, {{ singbox_vless_tls_key_path }}.
+  when: singbox_vless_security == 'tls'
+
+- name: Рендер systemd-юнита
+  ansible.builtin.template:
+    src: singbox.service.j2
+    dest: "/etc/systemd/system/{{ singbox_service }}.service"
+    mode: "0644"
+  notify: restart singbox
+
+- name: Рендер systemd-юнита Xray
+  ansible.builtin.template:
+    src: xray.service.j2
+    dest: "/etc/systemd/system/{{ xray_service }}.service"
+    mode: "0644"
+  when: singbox_vless_security == 'reality' and singbox_reality_server == 'xray'
+  notify: restart xray
+
+- name: Подготовить и применить согласованную пару sing-box
+  block:
+    - name: Определить необходимость обновления бинаря sing-box
+      ansible.builtin.set_fact:
+        _singbox_binary_changed: >-
+          {{ (_singbox_installed_versions | first | default('')) !=
+             singbox_version }}
+      changed_when: false
+
+    - name: Подготовить новый бинарь sing-box рядом с рабочим
+      when: _singbox_binary_changed | bool
+      block:
+        - name: Проверить наличие checksum для sing-box version/architecture
+          ansible.builtin.assert:
+            that:
+              - singbox_version in singbox_checksums
+              - singbox_arch in singbox_checksums.get(singbox_version, {})
+              - singbox_checksums.get(singbox_version, {}).get(singbox_arch, '') is
+                match('^sha256:[0-9a-f]{64}$')
+            fail_msg: >-
+              Нет доверенного SHA-256 для sing-box
+              {{ singbox_version }}/{{ singbox_arch }}.
+              Обнови singbox_checksums из digest официального GitHub Release.
+
+        - name: Создать приватный временный каталог для sing-box
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: sing-box-
+          register: _singbox_tmp
+          changed_when: false
+
+        - name: Скачать релиз sing-box
+          ansible.builtin.get_url:
+            url: >-
+              https://github.com/SagerNet/sing-box/releases/download/v{{ singbox_version }}/sing-box-{{ singbox_version }}-linux-{{ singbox_arch }}.tar.gz
+            dest: "{{ _singbox_tmp.path }}/sing-box.tar.gz"
+            mode: "0644"
+            checksum: "{{ singbox_checksums[singbox_version][singbox_arch] }}"
+          changed_when: false
+
+        - name: Распаковать sing-box
+          ansible.builtin.unarchive:
+            src: "{{ _singbox_tmp.path }}/sing-box.tar.gz"
+            dest: "{{ _singbox_tmp.path }}"
+            remote_src: true
+          changed_when: false
+
+        - name: Выложить кандидат sing-box рядом с рабочим бинарём
+          ansible.builtin.copy:
+            src: >-
+              {{ _singbox_tmp.path }}/sing-box-{{ singbox_version }}-linux-{{ singbox_arch }}/sing-box
+            dest: "{{ singbox_bin }}.candidate"
+            owner: root
+            group: root
+            mode: "0755"
+            remote_src: true
+          changed_when: false
+
+        - name: Проверить версию кандидата sing-box
+          ansible.builtin.command: "{{ singbox_bin }}.candidate version"
+          register: _singbox_candidate_version
+          changed_when: false
+          failed_when: >-
+            (_singbox_candidate_version.stdout | default('')) is not
+            search('(?m)^sing-box version ' ~
+                   (singbox_version | regex_escape) ~ '$')
+
+    - name: Выбрать бинарь sing-box для предварительной валидации
+      ansible.builtin.set_fact:
+        _singbox_validation_bin: >-
+          {{ singbox_bin ~ '.candidate'
+             if _singbox_binary_changed else singbox_bin }}
+      changed_when: false
+
+    - name: Отрендерить кандидат config.json sing-box
+      ansible.builtin.template:
+        src: config.json.j2
+        dest: "{{ singbox_config_dir }}/config.candidate.json"
+        owner: root
+        group: "{{ singbox_group }}"
+        mode: "0640"
+        # Сертификат Hy2 создаётся выше: validate видит все файлы, на которые
+        # ссылается staged config, до переключения согласованной пары.
+        validate: "{{ _singbox_validation_bin }} check -c %s"
+      changed_when: false
+      no_log: true
+
+    - name: Проверить рабочий и подготовленный конфиги sing-box
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: sha256
+      loop:
+        - "{{ singbox_config_dir }}/config.json"
+        - "{{ singbox_config_dir }}/config.candidate.json"
+      register: _singbox_config_stats
+      changed_when: false
+      no_log: true
+
+    - name: Определить необходимость переключения пары sing-box
+      ansible.builtin.set_fact:
+        _singbox_config_changed: >-
+          {{ not _singbox_config_stats.results[0].stat.exists or
+             _singbox_config_stats.results[0].stat.checksum !=
+             _singbox_config_stats.results[1].stat.checksum }}
+        _singbox_pair_changed: >-
+          {{ _singbox_binary_changed or
+             not _singbox_config_stats.results[0].stat.exists or
+             _singbox_config_stats.results[0].stat.checksum !=
+             _singbox_config_stats.results[1].stat.checksum }}
+      changed_when: false
+      no_log: true
+
+    - name: Переключить и проверить пару sing-box с восстановлением
+      when: _singbox_pair_changed | bool
+      block:
+        - name: Создать приватный каталог восстановления sing-box
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: sing-box-rollback-
+          register: _singbox_rollback_dir
+          changed_when: false
+
+        - name: Проверить наличие прежней пары sing-box
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "{{ singbox_bin }}"
+            - "{{ singbox_config_dir }}/config.json"
+          register: _singbox_previous_pair
+          changed_when: false
+          no_log: true
+
+        - name: Сохранить прежний бинарь sing-box
+          ansible.builtin.copy:
+            src: "{{ singbox_bin }}"
+            dest: "{{ _singbox_rollback_dir.path }}/sing-box"
+            mode: preserve
+            remote_src: true
+          when: _singbox_previous_pair.results[0].stat.exists
+          changed_when: false
+
+        - name: Сохранить прежний конфиг sing-box
+          ansible.builtin.copy:
+            src: "{{ singbox_config_dir }}/config.json"
+            dest: "{{ _singbox_rollback_dir.path }}/config.json"
+            mode: preserve
+            remote_src: true
+          when: _singbox_previous_pair.results[1].stat.exists
+          changed_when: false
+          no_log: true
+
+        - name: Запомнить исходное состояние сервиса sing-box
+          ansible.builtin.command:
+            argv:
+              - systemctl
+              - is-active
+              - "{{ singbox_service }}"
+          register: _singbox_was_active
+          changed_when: false
+          failed_when: false
+
+        - name: Переключить бинарь sing-box
+          ansible.builtin.copy:
+            src: "{{ singbox_bin }}.candidate"
+            dest: "{{ singbox_bin }}"
+            owner: root
+            group: root
+            mode: "0755"
+            remote_src: true
+          when: _singbox_binary_changed | bool
+
+        - name: Переключить конфиг sing-box
+          ansible.builtin.copy:
+            src: "{{ singbox_config_dir }}/config.candidate.json"
+            dest: "{{ singbox_config_dir }}/config.json"
+            owner: root
+            group: "{{ singbox_group }}"
+            mode: "0640"
+            remote_src: true
+          when: _singbox_config_changed | bool
+          no_log: true
+
+        - name: Перезапустить sing-box на новой паре
+          ansible.builtin.systemd:
+            name: "{{ singbox_service }}"
+            state: restarted
+            daemon_reload: true
+
+        - name: Проверить active state новой пары sing-box
+          ansible.builtin.command:
+            argv:
+              - systemctl
+              - is-active
+              - "{{ singbox_service }}"
+          register: _singbox_deployed_active
+          changed_when: false
+          failed_when: false
+
+        - name: Проверить TCP listener новой пары sing-box
+          ansible.builtin.command:
+            argv:
+              - ss
+              - -ltnH
+              - "sport = :{{ singbox_reality_port }}"
+          register: _singbox_deployed_reality_listener
+          changed_when: false
+          failed_when: false
+          when: >-
+            singbox_vless_security == 'tls' or
+            singbox_reality_server == 'singbox'
+
+        - name: Проверить UDP listener новой пары sing-box
+          ansible.builtin.command:
+            argv:
+              - ss
+              - -lunH
+              - "sport = :{{ singbox_hy2_port }}"
+          register: _singbox_deployed_hy2_listener
+          changed_when: false
+          failed_when: false
+          when: singbox_hy2_enabled
+
+        - name: Assert — новая пара sing-box работоспособна
+          ansible.builtin.assert:
+            that:
+              - _singbox_deployed_active.rc == 0
+              - (_singbox_deployed_active.stdout | trim) == 'active'
+              - >-
+                not (singbox_vless_security == 'tls' or
+                     singbox_reality_server == 'singbox') or
+                ((_singbox_deployed_reality_listener.rc | default(1)) == 0 and
+                 (_singbox_deployed_reality_listener.stdout |
+                  default('') | trim | length) > 0)
+              - >-
+                (not singbox_hy2_enabled) or
+                ((_singbox_deployed_hy2_listener.rc | default(1)) == 0 and
+                 (_singbox_deployed_hy2_listener.stdout |
+                  default('') | trim | length) > 0)
+            fail_msg: Новая пара sing-box не прошла post-restart health-check.
+      rescue:
+        - name: Восстановить прежний бинарь sing-box
+          ansible.builtin.copy:
+            src: "{{ _singbox_rollback_dir.path }}/sing-box"
+            dest: "{{ singbox_bin }}"
+            owner: root
+            group: root
+            mode: "0755"
+            remote_src: true
+          when: _singbox_previous_pair.results[0].stat.exists
+
+        - name: Удалить новый бинарь sing-box при отсутствии прежнего
+          ansible.builtin.file:
+            path: "{{ singbox_bin }}"
+            state: absent
+          when: not _singbox_previous_pair.results[0].stat.exists
+
+        - name: Восстановить прежний конфиг sing-box
+          ansible.builtin.copy:
+            src: "{{ _singbox_rollback_dir.path }}/config.json"
+            dest: "{{ singbox_config_dir }}/config.json"
+            owner: root
+            group: "{{ singbox_group }}"
+            mode: "0640"
+            remote_src: true
+          when: _singbox_previous_pair.results[1].stat.exists
+          no_log: true
+
+        - name: Удалить новый конфиг sing-box при отсутствии прежнего
+          ansible.builtin.file:
+            path: "{{ singbox_config_dir }}/config.json"
+            state: absent
+          when: not _singbox_previous_pair.results[1].stat.exists
+          no_log: true
+
+        - name: Перезапустить восстановленную пару sing-box
+          ansible.builtin.systemd:
+            name: "{{ singbox_service }}"
+            state: restarted
+            daemon_reload: true
+          when:
+            - _singbox_previous_pair.results[0].stat.exists
+            - _singbox_previous_pair.results[1].stat.exists
+            - (_singbox_was_active.stdout | default('') | trim) == 'active'
+
+        - name: Проверить версию восстановленного sing-box
+          ansible.builtin.command: "{{ singbox_bin }} version"
+          register: _singbox_rollback_version
+          changed_when: false
+          failed_when: false
+          when: _singbox_previous_pair.results[0].stat.exists
+
+        - name: Проверить active state восстановленного sing-box
+          ansible.builtin.command:
+            argv:
+              - systemctl
+              - is-active
+              - "{{ singbox_service }}"
+          register: _singbox_rollback_active
+          changed_when: false
+          failed_when: false
+          when: (_singbox_was_active.stdout | default('') | trim) == 'active'
+
+        - name: Assert — прежняя пара sing-box восстановлена
+          ansible.builtin.assert:
+            that:
+              - >-
+                not _singbox_previous_pair.results[0].stat.exists or
+                _singbox_rollback_version.stdout == _singbox_installed.stdout
+              - >-
+                (_singbox_was_active.stdout | default('') | trim) != 'active' or
+                ((_singbox_rollback_active.rc | default(1)) == 0 and
+                 (_singbox_rollback_active.stdout |
+                  default('') | trim) == 'active')
+            fail_msg: >-
+              Не удалось подтвердить восстановление прежней пары sing-box.
+
+        - name: Остановить прогон после подтверждённого восстановления sing-box
+          ansible.builtin.fail:
+            msg: Новая пара sing-box не применена; прежняя пара восстановлена.
+  always:
+    - name: Удалить временный каталог загрузки sing-box
+      ansible.builtin.file:
+        path: >-
+          {{ (_singbox_tmp | default({})).get('path',
+             '/tmp/sing-box-download-not-created') }}
+        state: absent
+      when: _singbox_tmp is defined
+      changed_when: false
+
+    - name: Удалить приватный каталог восстановления sing-box
+      ansible.builtin.file:
+        path: >-
+          {{ (_singbox_rollback_dir | default({})).get('path',
+             '/tmp/sing-box-rollback-not-created') }}
+        state: absent
+      when: _singbox_rollback_dir is defined
+      changed_when: false
+
+    - name: Удалить подготовленный конфиг sing-box
+      ansible.builtin.file:
+        path: "{{ singbox_config_dir }}/config.candidate.json"
+        state: absent
+      changed_when: false
+      no_log: true
+
+    - name: Удалить подготовленный бинарь sing-box
+      ansible.builtin.file:
+        path: "{{ singbox_bin }}.candidate"
+        state: absent
+      changed_when: false
+
+- name: Подготовить и применить согласованную пару Xray
+  when: singbox_vless_security == 'reality' and singbox_reality_server == 'xray'
+  block:
+    - name: Определить необходимость обновления бинаря Xray
+      ansible.builtin.set_fact:
+        _xray_binary_changed: >-
+          {{ (_xray_installed_versions | default([]) | first | default('')) !=
+             xray_version }}
+      changed_when: false
+
+    - name: Подготовить новый бинарь Xray рядом с рабочим
+      when: _xray_binary_changed | bool
+      block:
+        - name: Проверить наличие checksum для Xray version/architecture
+          ansible.builtin.assert:
+            that:
+              - xray_version in xray_checksums
+              - singbox_arch in xray_checksums.get(xray_version, {})
+              - singbox_arch in xray_arch_assets
+              - xray_checksums.get(xray_version, {}).get(singbox_arch, '') is
+                match('^sha256:[0-9a-f]{64}$')
+            fail_msg: >-
+              Нет доверенного SHA-256 для Xray
+              {{ xray_version }}/{{ singbox_arch }}.
+              Обнови xray_checksums из digest официального GitHub Release.
+
+        - name: Создать приватный временный каталог для Xray
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: xray-
+          register: _xray_tmp
+
+        - name: Скачать релиз Xray
+          ansible.builtin.get_url:
+            url: >-
+              https://github.com/XTLS/Xray-core/releases/download/v{{ xray_version }}/Xray-linux-{{ xray_arch_assets[singbox_arch] }}.zip
+            dest: "{{ _xray_tmp.path }}/xray.zip"
+            mode: "0644"
+            checksum: "{{ xray_checksums[xray_version][singbox_arch] }}"
+
+        - name: Распаковать Xray
+          ansible.builtin.unarchive:
+            src: "{{ _xray_tmp.path }}/xray.zip"
+            dest: "{{ _xray_tmp.path }}"
+            remote_src: true
+
+        - name: Выложить кандидат Xray рядом с рабочим бинарём
+          ansible.builtin.copy:
+            src: "{{ _xray_tmp.path }}/xray"
+            dest: "{{ xray_bin }}.candidate"
+            owner: root
+            group: root
+            mode: "0755"
+            remote_src: true
+          changed_when: false
+
+        - name: Проверить версию кандидата Xray
+          ansible.builtin.command: "{{ xray_bin }}.candidate version"
+          register: _xray_candidate_version
+          changed_when: false
+          failed_when: >-
+            (_xray_candidate_version.stdout | default('')) is not
+            search('^Xray ' ~ (xray_version | regex_escape) ~ ' ')
+
+    - name: Выбрать бинарь Xray для предварительной валидации
+      ansible.builtin.set_fact:
+        _xray_validation_bin: >-
+          {{ xray_bin ~ '.candidate' if _xray_binary_changed else xray_bin }}
+      changed_when: false
+
+    - name: Отрендерить кандидат config.json Xray
+      ansible.builtin.template:
+        src: xray-config.json.j2
+        dest: "{{ xray_config_dir }}/config.candidate.json"
+        owner: root
+        group: "{{ xray_group }}"
+        mode: "0640"
+        validate: "{{ _xray_validation_bin }} run -test -config %s"
+      changed_when: false
+      no_log: true
+
+    - name: Проверить рабочий и подготовленный конфиги Xray
+      ansible.builtin.stat:
+        path: "{{ item }}"
+        checksum_algorithm: sha256
+      loop:
+        - "{{ xray_config_dir }}/config.json"
+        - "{{ xray_config_dir }}/config.candidate.json"
+      register: _xray_config_stats
+      changed_when: false
+      no_log: true
+
+    - name: Определить необходимость переключения пары Xray
+      ansible.builtin.set_fact:
+        _xray_config_changed: >-
+          {{ not _xray_config_stats.results[0].stat.exists or
+             _xray_config_stats.results[0].stat.checksum !=
+             _xray_config_stats.results[1].stat.checksum }}
+        _xray_pair_changed: >-
+          {{ _xray_binary_changed or
+             not _xray_config_stats.results[0].stat.exists or
+             _xray_config_stats.results[0].stat.checksum !=
+             _xray_config_stats.results[1].stat.checksum }}
+      changed_when: false
+      no_log: true
+
+    - name: Переключить и проверить пару Xray с восстановлением
+      when: _xray_pair_changed | bool
+      block:
+        - name: Создать приватный каталог восстановления Xray
+          ansible.builtin.tempfile:
+            state: directory
+            prefix: xray-rollback-
+          register: _xray_rollback_dir
+          changed_when: false
+
+        - name: Проверить наличие прежней пары Xray
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          loop:
+            - "{{ xray_bin }}"
+            - "{{ xray_config_dir }}/config.json"
+          register: _xray_previous_pair
+          changed_when: false
+          no_log: true
+
+        - name: Сохранить прежний бинарь Xray
+          ansible.builtin.copy:
+            src: "{{ xray_bin }}"
+            dest: "{{ _xray_rollback_dir.path }}/xray"
+            mode: preserve
+            remote_src: true
+          when: _xray_previous_pair.results[0].stat.exists
+          changed_when: false
+
+        - name: Сохранить прежний конфиг Xray
+          ansible.builtin.copy:
+            src: "{{ xray_config_dir }}/config.json"
+            dest: "{{ _xray_rollback_dir.path }}/config.json"
+            mode: preserve
+            remote_src: true
+          when: _xray_previous_pair.results[1].stat.exists
+          changed_when: false
+          no_log: true
+
+        - name: Запомнить исходное состояние сервиса Xray
+          ansible.builtin.command:
+            argv:
+              - systemctl
+              - is-active
+              - "{{ xray_service }}"
+          register: _xray_was_active
+          changed_when: false
+          failed_when: false
+
+        - name: Переключить бинарь Xray
+          ansible.builtin.copy:
+            src: "{{ xray_bin }}.candidate"
+            dest: "{{ xray_bin }}"
+            owner: root
+            group: root
+            mode: "0755"
+            remote_src: true
+          when: _xray_binary_changed | bool
+
+        - name: Переключить конфиг Xray
+          ansible.builtin.copy:
+            src: "{{ xray_config_dir }}/config.candidate.json"
+            dest: "{{ xray_config_dir }}/config.json"
+            owner: root
+            group: "{{ xray_group }}"
+            mode: "0640"
+            remote_src: true
+          when: _xray_config_changed | bool
+          no_log: true
+
+        - name: Перезапустить Xray на новой паре
+          ansible.builtin.systemd:
+            name: "{{ xray_service }}"
+            state: restarted
+            daemon_reload: true
+
+        - name: Проверить active state новой пары Xray
+          ansible.builtin.command:
+            argv:
+              - systemctl
+              - is-active
+              - "{{ xray_service }}"
+          register: _xray_deployed_active
+          changed_when: false
+          failed_when: false
+
+        - name: Проверить listener новой пары Xray
+          ansible.builtin.command:
+            argv:
+              - ss
+              - -ltnH
+              - "sport = :{{ xray_listen_port }}"
+          register: _xray_deployed_listener
+          changed_when: false
+          failed_when: false
+
+        - name: Assert — новая пара Xray работоспособна
+          ansible.builtin.assert:
+            that:
+              - _xray_deployed_active.rc == 0
+              - (_xray_deployed_active.stdout | trim) == 'active'
+              - _xray_deployed_listener.rc == 0
+              - (_xray_deployed_listener.stdout | trim | length) > 0
+            fail_msg: Новая пара Xray не прошла post-restart health-check.
+      rescue:
+        - name: Восстановить прежний бинарь Xray
+          ansible.builtin.copy:
+            src: "{{ _xray_rollback_dir.path }}/xray"
+            dest: "{{ xray_bin }}"
+            owner: root
+            group: root
+            mode: "0755"
+            remote_src: true
+          when: _xray_previous_pair.results[0].stat.exists
+
+        - name: Удалить новый бинарь Xray при отсутствии прежнего
+          ansible.builtin.file:
+            path: "{{ xray_bin }}"
+            state: absent
+          when: not _xray_previous_pair.results[0].stat.exists
+
+        - name: Восстановить прежний конфиг Xray
+          ansible.builtin.copy:
+            src: "{{ _xray_rollback_dir.path }}/config.json"
+            dest: "{{ xray_config_dir }}/config.json"
+            owner: root
+            group: "{{ xray_group }}"
+            mode: "0640"
+            remote_src: true
+          when: _xray_previous_pair.results[1].stat.exists
+          no_log: true
+
+        - name: Удалить новый конфиг Xray при отсутствии прежнего
+          ansible.builtin.file:
+            path: "{{ xray_config_dir }}/config.json"
+            state: absent
+          when: not _xray_previous_pair.results[1].stat.exists
+          no_log: true
+
+        - name: Перезапустить восстановленную пару Xray
+          ansible.builtin.systemd:
+            name: "{{ xray_service }}"
+            state: restarted
+            daemon_reload: true
+          when:
+            - _xray_previous_pair.results[0].stat.exists
+            - _xray_previous_pair.results[1].stat.exists
+            - (_xray_was_active.stdout | default('') | trim) == 'active'
+
+        - name: Проверить версию восстановленного Xray
+          ansible.builtin.command: "{{ xray_bin }} version"
+          register: _xray_rollback_version
+          changed_when: false
+          failed_when: false
+          when: _xray_previous_pair.results[0].stat.exists
+
+        - name: Проверить active state восстановленного Xray
+          ansible.builtin.command:
+            argv:
+              - systemctl
+              - is-active
+              - "{{ xray_service }}"
+          register: _xray_rollback_active
+          changed_when: false
+          failed_when: false
+          when: (_xray_was_active.stdout | default('') | trim) == 'active'
+
+        - name: Assert — прежняя пара Xray восстановлена
+          ansible.builtin.assert:
+            that:
+              - >-
+                not _xray_previous_pair.results[0].stat.exists or
+                _xray_rollback_version.stdout == _xray_installed.stdout
+              - >-
+                (_xray_was_active.stdout | default('') | trim) != 'active' or
+                ((_xray_rollback_active.rc | default(1)) == 0 and
+                 (_xray_rollback_active.stdout | default('') | trim) == 'active')
+            fail_msg: Не удалось подтвердить восстановление прежней пары Xray.
+
+        - name: Остановить прогон после подтверждённого восстановления Xray
+          ansible.builtin.fail:
+            msg: Новая пара Xray не применена; прежняя пара восстановлена.
+  always:
+    - name: Удалить временный каталог загрузки Xray
+      ansible.builtin.file:
+        path: >-
+          {{ (_xray_tmp | default({})).get('path',
+             '/tmp/xray-download-not-created') }}
+        state: absent
+      when: _xray_tmp is defined
+      changed_when: false
+
+    - name: Удалить приватный каталог восстановления Xray
+      ansible.builtin.file:
+        path: >-
+          {{ (_xray_rollback_dir | default({})).get('path',
+             '/tmp/xray-rollback-not-created') }}
+        state: absent
+      when: _xray_rollback_dir is defined
+      changed_when: false
+
+    - name: Удалить подготовленный конфиг Xray
+      ansible.builtin.file:
+        path: "{{ xray_config_dir }}/config.candidate.json"
+        state: absent
+      changed_when: false
+      no_log: true
+
+    - name: Удалить подготовленный бинарь Xray
+      ansible.builtin.file:
+        path: "{{ xray_bin }}.candidate"
+        state: absent
+      changed_when: false
+
+- name: Остановить legacy Xray перед возвратом Reality в sing-box
+  ansible.builtin.systemd:
+    name: "{{ xray_service }}"
+    enabled: false
+    state: stopped
+    daemon_reload: true
+  when: not (singbox_vless_security == 'reality' and singbox_reality_server == 'xray')
+  failed_when: false
+
+- name: Включить и запустить sing-box
+  ansible.builtin.systemd:
+    name: "{{ singbox_service }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Применить restart-хэндлер до health-check
+  ansible.builtin.meta: flush_handlers
+
+- name: Включить и запустить Xray
+  ansible.builtin.systemd:
+    name: "{{ xray_service }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+  when: singbox_vless_security == 'reality' and singbox_reality_server == 'xray'
+
+- name: Проверить active state sing-box
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-active
+      - "{{ singbox_service }}"
+  register: _singbox_active
+  changed_when: false
+  failed_when: false
+
+- name: Проверить active state Xray
+  ansible.builtin.command:
+    argv:
+      - systemctl
+      - is-active
+      - "{{ xray_service }}"
+  register: _xray_active
+  changed_when: false
+  failed_when: false
+  when: singbox_vless_security == 'reality' and singbox_reality_server == 'xray'
+
+- name: Проверить TCP listener VLESS
+  ansible.builtin.command:
+    argv:
+      - ss
+      - -ltnH
+      - >-
+        sport = :{{ xray_listen_port
+        if singbox_vless_security == 'reality' and singbox_reality_server == 'xray'
+        else singbox_reality_port }}
+  register: _singbox_reality_listener
+  changed_when: false
+  failed_when: false
+
+- name: Проверить UDP listener Hysteria2
+  ansible.builtin.command:
+    argv:
+      - ss
+      - -lunH
+      - "sport = :{{ singbox_hy2_port }}"
+  register: _singbox_hy2_listener
+  changed_when: false
+  failed_when: false
+  when: singbox_hy2_enabled
+
+- name: Assert — sing-box active и слушает настроенные порты
+  ansible.builtin.assert:
+    that:
+      - _singbox_active.rc == 0
+      - (_singbox_active.stdout | trim) == 'active'
+      - >-
+        singbox_reality_server != 'xray' or singbox_vless_security != 'reality' or
+        ((_xray_active.rc | default(1)) == 0 and
+         (_xray_active.stdout | default('') | trim) == 'active')
+      - _singbox_reality_listener.rc == 0
+      - (_singbox_reality_listener.stdout | trim | length) > 0
+      - >-
+        (not singbox_hy2_enabled) or
+        ((_singbox_hy2_listener.rc | default(1)) == 0 and
+         (_singbox_hy2_listener.stdout | default('') | trim | length) > 0)
+    fail_msg: >-
+      sing-box не прошёл post-restart health-check. Проверь:
+      journalctl -u {{ singbox_service }} -n 50

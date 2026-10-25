@@ -1,0 +1,10 @@
+---
+# Authorized SSH keys for the devops user on fleet nodes.
+# Single source of truth — do NOT add keys manually on servers.
+#
+# Список намеренно пуст: bootstrap ассертит его непустоту и падает до того,
+# как отключит root и пароль. Заполнить своим ключом ДО первого прогона —
+# иначе нода останется без единой двери.
+ssh_authorized_keys_devops: []
+#  - name: my-laptop
+#    pubkey: "ssh-ed25519 AAAA... me@laptop"

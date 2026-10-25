@@ -1,0 +1,16 @@
+# {{ ansible_managed }}
+# Management WireGuard для узла {{ node_name }}. Порт наружу закрыт (см. роль
+# firewall): пиры приходят через detour внутри VLESS/Hysteria2.
+
+[Interface]
+Address = {{ wg_mgmt_server_address }}
+ListenPort = {{ wg_mgmt_listen_port }}
+MTU = {{ wg_mgmt_mtu }}
+PrivateKey = {{ node_wg.server_private_key }}
+{% for peer in node_wg.peers %}
+
+# Peer: {{ peer.name }}
+[Peer]
+PublicKey = {{ peer.public_key }}
+AllowedIPs = {{ peer.address }}/32
+{% endfor %}

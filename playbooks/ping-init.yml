@@ -1,6 +1,0 @@
-- name: Ping bootstrap host (root + password)
-  hosts: bootstrap
-  gather_facts: no
-  tasks:
-    - name: Ping as root
-      ping:

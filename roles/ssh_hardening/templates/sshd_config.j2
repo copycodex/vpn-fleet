@@ -1,0 +1,68 @@
+# {{ ansible_managed }}
+# Hardened sshd_config based on Mozilla OpenSSH Guidelines
+# https://infosec.mozilla.org/guidelines/openssh
+
+# ─── Network ──────────────────────────────────────────────────────────────────
+Port {{ ssh_port }}
+AddressFamily {{ ssh_address_family }}
+ListenAddress 0.0.0.0
+ListenAddress ::
+
+# ─── HostKeys (keep defaults — generated at install time) ────────────────────
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+HostKey /etc/ssh/ssh_host_ed25519_key
+
+# ─── Cryptography ─────────────────────────────────────────────────────────────
+HostKeyAlgorithms {{ ssh_host_key_algorithms | join(',') }}
+KexAlgorithms {{ ssh_kex_algorithms | join(',') }}
+Ciphers {{ ssh_ciphers | join(',') }}
+MACs {{ ssh_macs | join(',') }}
+
+# ─── Authentication ───────────────────────────────────────────────────────────
+PermitRootLogin no
+PasswordAuthentication no
+ChallengeResponseAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+PermitEmptyPasswords no
+UsePAM yes
+AuthenticationMethods publickey
+
+LoginGraceTime {{ ssh_login_grace_time }}
+MaxAuthTries {{ ssh_max_auth_tries }}
+MaxSessions {{ ssh_max_sessions }}
+MaxStartups {{ ssh_max_startups }}
+
+AllowUsers {{ ssh_allowed_users | join(' ') }}
+
+# ─── Connection behaviour ─────────────────────────────────────────────────────
+ClientAliveInterval {{ ssh_client_alive_interval }}
+ClientAliveCountMax {{ ssh_client_alive_count_max }}
+TCPKeepAlive yes
+
+# ─── Forwarding ───────────────────────────────────────────────────────────────
+X11Forwarding {{ 'yes' if ssh_x11_forwarding else 'no' }}
+AllowTcpForwarding {{ 'yes' if ssh_allow_tcp_forwarding else 'no' }}
+AllowAgentForwarding {{ 'yes' if ssh_allow_agent_forwarding else 'no' }}
+GatewayPorts no
+PermitTunnel no
+
+# ─── Misc ─────────────────────────────────────────────────────────────────────
+Subsystem sftp /usr/lib/openssh/sftp-server
+Compression no
+PrintMotd no
+PrintLastLog yes
+StrictModes yes
+
+{% if ssh_banner_enabled %}
+Banner /etc/ssh/banner.txt
+{% endif %}
+
+# ─── Logging ──────────────────────────────────────────────────────────────────
+SyslogFacility AUTH
+LogLevel VERBOSE
+
+# ─── Include files (allow operator overrides) ────────────────────────────────
+# Note: cloud-init override (50-cloud-init.conf) was removed by bootstrap role.
+Include /etc/ssh/sshd_config.d/*.conf

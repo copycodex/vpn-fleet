@@ -1,6 +1,0 @@
-# First connection as root via password
-ansible_user: "{{ lookup('env','SSH_USER_INIT') | default('root') }}"
-ansible_port: "{{ (lookup('env','SSH_PORT_INIT') | default('22')) | int }}"
-ansible_password: "{{ lookup('env','SSH_PASS_INIT') | default(omit) }}"
-
-user_password: "{{ lookup('env','BECOME_PASSWORD') | default('') }}"

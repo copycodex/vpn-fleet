@@ -1,0 +1,21 @@
+// {{ ansible_managed }}
+// Managed unattended security upgrades — no auto-reboot.
+
+Unattended-Upgrade::Allowed-Origins {
+    "${distro_id}:${distro_codename}-security";
+    "${distro_id}ESMApps:${distro_codename}-apps-security";
+    "${distro_id}ESM:${distro_codename}-infra-security";
+};
+
+Unattended-Upgrade::Package-Blacklist {
+};
+
+// Don't auto-reboot, even after kernel updates
+Unattended-Upgrade::Automatic-Reboot "false";
+
+// Verbose log
+Unattended-Upgrade::SyslogEnable "true";
+Unattended-Upgrade::SyslogFacility "daemon";
+
+// Email notifications — disabled until Phase 8 (monitoring stack)
+// Unattended-Upgrade::Mail "ops@example.com";

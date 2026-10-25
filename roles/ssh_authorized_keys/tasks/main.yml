@@ -1,0 +1,36 @@
+---
+# Проверяется именно административный список, а не сумма с node_extra.
+# Если assert принимает сумму вместо административного списка, прогон с
+# `-i inventories/nodes/<node>.yml` переписал authorized_keys одним
+# служебным ключом: при таком -i каталог inventories/group_vars/ не читается,
+# ssh_authorized_keys_devops остаётся неопределённым, а роль пишет файл с
+# exclusive: true. Ключи администратора — единственная дверь на ноду, и
+# служебный ключ туннеля их не заменяет ни при каких условиях.
+- name: Assert — administrative SSH key list is not empty
+  ansible.builtin.assert:
+    that:
+      - ssh_authorized_keys_devops | default([]) | length > 0
+    fail_msg: >-
+      Refusing to apply an empty administrative key list for
+      {{ ssh_authorized_keys_user }}. Запускать плейбук с инвентарём
+      `inventories` целиком; при `-i inventories/nodes/<node>.yml`
+      group_vars/all не читается и этот список пуст.
+    quiet: true
+
+# Склейка через join("\n") записывает в файл ЛИТЕРАЛЬНЫЙ «\n» — все
+# ключи слиплись в одну строку, и рабочим остался только первый: остальное sshd
+# прочитал как комментарий к нему. Literal block ниже создаёт настоящие переводы
+# строк. Весь набор передаётся модулю одной операцией, чтобы exclusive атомарно
+# заменял прежний полный набор новым полным набором.
+- name: Ensure authorized keys for {{ ssh_authorized_keys_user }}
+  ansible.posix.authorized_key:
+    user: "{{ ssh_authorized_keys_user }}"
+    key: |-
+      {% for authorized_key in ssh_authorized_keys_all %}
+      {{ authorized_key.pubkey }}
+      {% endfor %}
+    state: present
+    exclusive: "{{ ssh_authorized_keys_exclusive }}"
+  vars:
+    ssh_authorized_keys_all: >-
+      {{ ssh_authorized_keys_devops + ssh_authorized_keys_node_extra }}

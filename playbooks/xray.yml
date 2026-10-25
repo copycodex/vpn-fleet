@@ -1,6 +1,0 @@
-- name: Deploy Xray (behind Traefik)
-  hosts: app
-  gather_facts: yes
-  roles:
-    - role: xray
-      tags: [xray]

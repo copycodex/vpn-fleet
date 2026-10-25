@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: ssh_hardening
+  author: vpn-fleet
+  description: Mozilla-grade SSH hardening (full sshd_config rewrite)
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble]
+dependencies: []

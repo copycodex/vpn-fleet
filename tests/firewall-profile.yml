@@ -1,0 +1,7 @@
+---
+- name: Validate firewall role directly without a public profile
+  hosts: all
+  gather_facts: false
+  become: false
+  roles:
+    - firewall

@@ -1,0 +1,37 @@
+---
+- name: Exercise recoverable sing-box deployment with synthetic inputs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    node_name: ci
+    singbox_client_names: [recovery-smoke]
+    singbox_bin: /tmp/vpn-fleet-singbox-recovery/bin/sing-box
+    singbox_config_dir: /tmp/vpn-fleet-singbox-recovery/sing-box
+    singbox_service: sing-box-recovery-smoke
+    singbox_user: root
+    singbox_group: root
+    singbox_hy2_enabled: false
+    singbox_reality_server: xray
+    singbox_reality_dest: www.apple.com
+    singbox_reality_sni: www.apple.com
+    singbox_sni_routing_enabled: false
+    xray_bin: /tmp/vpn-fleet-singbox-recovery/bin/xray
+    xray_config_dir: /tmp/vpn-fleet-singbox-recovery/xray
+    xray_service: xray-recovery-smoke
+    xray_user: root
+    xray_group: root
+    xray_sni_routing_enabled: false
+  pre_tasks:
+    - name: Set synthetic credentials for the role
+      ansible.builtin.set_fact:
+        node_ci_clients:
+          - name: recovery-smoke
+            uuid: 00000000-0000-4000-8000-000000000001
+        node_ci_reality_private_key: synthetic-private-key
+        node_ci_reality_public_key: synthetic-public-key
+        node_ci_reality_short_id: 0123456789abcdef
+      changed_when: false
+      no_log: true
+  roles:
+    - role: singbox

@@ -1,8 +1,0 @@
-# Connection after hardening (key-based)
-ansible_user: "{{ lookup('env','SSH_USER') | default('copycodex') }}"
-ansible_port: "{{ (lookup('env','SSH_PORT') | default('2222')) | int }}"
-ansible_ssh_private_key_file: "{{ lookup('env','SSH_KEY') | default('~/.ssh/id_rsa') }}"
-
-ansible_become: true
-ansible_become_method: sudo
-ansible_become_password: "{{ lookup('env','BECOME_PASSWORD') | default('') }}"

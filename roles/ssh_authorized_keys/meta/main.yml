@@ -1,0 +1,13 @@
+---
+# Local divergence from infra@d888464: install the joined key set in one call
+# and default to exclusive=true. Backport: MR-9.
+galaxy_info:
+  role_name: ssh_authorized_keys
+  author: vpn-fleet
+  description: Authoritative SSH keys for the managed user
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble]
+dependencies: []

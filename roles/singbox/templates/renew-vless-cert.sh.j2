@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+install -o root -g {{ singbox_group | quote }} -m0640 \
+  {{ (singbox_vless_tls_source_dir ~ '/fullchain.pem') | quote }} \
+  {{ singbox_vless_tls_certificate_path | quote }}
+install -o root -g {{ singbox_group | quote }} -m0640 \
+  {{ (singbox_vless_tls_source_dir ~ '/privkey.pem') | quote }} \
+  {{ singbox_vless_tls_key_path | quote }}
+systemctl restart {{ singbox_service | quote }}

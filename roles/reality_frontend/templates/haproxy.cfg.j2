@@ -1,0 +1,24 @@
+# Ansible managed
+# mode tcp: поток передаётся байт в байт, Reality сам разбирает TLS.
+global
+    log /dev/log local0
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    log global
+    mode tcp
+    timeout connect 10s
+    timeout client 1m
+    timeout server 1m
+    timeout tunnel 1h
+
+frontend tls_entry
+    bind :{{ reality_frontend_bind_port }}
+    tcp-request inspect-delay {{ reality_frontend_inspect_delay }}
+    tcp-request content accept if { req.ssl_hello_type 1 }
+    default_backend reality
+
+backend reality
+    server xray {{ reality_frontend_backend_host }}:{{ reality_frontend_backend_port }} check

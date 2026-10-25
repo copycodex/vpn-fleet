@@ -1,0 +1,34 @@
+---
+- name: Refresh inventory after a file mutation in the same Ansible process
+  hosts: ci
+  gather_facts: false
+  tasks:
+    - name: Assert initial inventory snapshot
+      ansible.builtin.assert:
+        that:
+          - singbox_client_names == ['ci-client']
+
+    - name: Simulate add-client inventory mutation
+      ansible.builtin.lineinfile:
+        path: "{{ refresh_inventory_file }}"
+        insertafter: '^        - ci-client$'
+        line: '        - iphone'
+        mode: "0644"
+      delegate_to: localhost
+
+    - name: Prove inventory remains stale before explicit refresh
+      ansible.builtin.assert:
+        that:
+          - hostvars[inventory_hostname].singbox_client_names == ['ci-client']
+        fail_msg: The regression setup no longer reproduces the stale snapshot.
+
+    - name: Refresh inventory after mutation
+      ansible.builtin.meta: refresh_inventory
+
+    - name: Assert refreshed inventory reaches the current play
+      ansible.builtin.assert:
+        that:
+          - hostvars[inventory_hostname].singbox_client_names == ['ci-client', 'iphone']
+        fail_msg: >-
+          refresh_inventory must replace the inventory snapshot loaded before
+          add-client mutated the file.

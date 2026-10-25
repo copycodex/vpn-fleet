@@ -1,0 +1,45 @@
+---
+- name: Add client credential to SOPS
+  hosts: all
+  gather_facts: false
+  become: false
+  tasks:
+    - name: Assert — выбран ровно один узел и задано безопасное имя клиента
+      ansible.builtin.assert:
+        that:
+          - ansible_play_hosts_all | length == 1
+          - client_name is defined
+          - client_name is match('^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$')
+        fail_msg: "Укажи ровно один NODE и безопасный NAME клиента."
+        quiet: true
+
+    - name: Атомарно добавить UUID в SOPS
+      ansible.builtin.command:
+        argv:
+          - "{{ playbook_dir }}/../scripts/add-client.sh"
+          - "{{ node_name }}"
+          - "{{ client_name }}"
+      delegate_to: localhost
+      run_once: true
+      changed_when: true
+      no_log: true
+
+    # И inventory, и SOPS vars plugin загрузили файлы до mutation.
+    # Перечитываем оба источника, чтобы imported play сравнивал
+    # два фактических файла, а не файл SOPS со stale inventory.
+    - name: Перезагрузить изменённый inventory
+      ansible.builtin.meta: refresh_inventory
+
+    - name: Перезагрузить изменённые SOPS variables
+      community.sops.load_vars:
+        file: "{{ vpn_fleet_secrets_file | default(playbook_dir ~ '/../private/inventories/group_vars/all/secrets.sops.yml') }}"
+        return_method: facts-only
+      no_log: true
+
+- name: Deploy updated server config
+  ansible.builtin.import_playbook: deploy-node.yml
+
+- name: Export only the new client
+  ansible.builtin.import_playbook: export-clients.yml
+  vars:
+    client_filter: "{{ client_name }}"

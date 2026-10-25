@@ -1,0 +1,16 @@
+---
+# Management-only WireGuard: адресация устройств (телефон-реле, десктоп) для
+# adb/scrcpy, а НЕ транзит пользовательского трафика — тот идёт через
+# VLESS-Reality/Hysteria2 как раньше.
+#
+# Порт наружу не публикуется намеренно. Клиенты приходят на него ИЗНУТРИ уже
+# установленного туннеля: sing-box endpoint с "detour" отправляет WireGuard в
+# VLESS, Xray доставляет на 127.0.0.1. Снаружи WireGuard-хендшейка не видно
+# вовсе, поэтому DPI (РФ режет WG по сигнатуре) резать нечего.
+wg_mgmt_interface: wg-mgmt
+wg_mgmt_subnet: "10.88.0.0/24"
+wg_mgmt_server_address: "10.88.0.1/24"
+wg_mgmt_listen_port: 51820
+wg_mgmt_mtu: 1420                   # 1420 = 1500 - 80 (WG over IPv4 + запас на VLESS)
+wg_mgmt_config_dir: /etc/wireguard
+wg_mgmt_persistent_keepalive: 25    # держит сессию пира за NAT

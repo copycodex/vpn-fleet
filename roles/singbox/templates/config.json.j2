@@ -1,0 +1,73 @@
+{# {{ ansible_managed }} — SKELETON, валидировать схему под пиннутую версию sing-box (EV-1) #}
+{
+  "log": { "level": "{{ singbox_log_level }}", "timestamp": true },
+  "inbounds": [
+{% if singbox_vless_security == 'tls' or singbox_reality_server == 'singbox' %}
+    {
+      "type": "vless",
+      "tag": "vless-{{ singbox_vless_security }}-in",
+      "listen": "::",
+      "listen_port": {{ singbox_reality_port }},
+      "users": [
+{% for c in node_clients %}
+        { "uuid": "{{ c.uuid }}", "flow": "xtls-rprx-vision", "name": "{{ c.name }}" }{{ "," if not loop.last else "" }}
+{% endfor %}
+      ],
+      "tls": {
+        "enabled": true,
+        "server_name": "{{ singbox_vless_tls_server_name if singbox_vless_security == 'tls' else singbox_reality_sni }}",
+{% if singbox_vless_security == 'reality' %}
+        "reality": {
+          "enabled": true,
+          "handshake": { "server": "{{ singbox_reality_dest }}", "server_port": 443 },
+          "private_key": "{{ node_reality_private_key }}",
+          "short_id": ["{{ node_reality_short_id }}"]
+        }
+{% else %}
+        "certificate_path": "{{ singbox_vless_tls_certificate_path }}",
+        "key_path": "{{ singbox_vless_tls_key_path }}"
+{% endif %}
+      }
+    }{% if singbox_hy2_enabled %},{% endif %}
+{% endif %}
+{% if singbox_hy2_enabled %}
+    {
+      "type": "hysteria2",
+      "tag": "hy2-in",
+      "listen": "::",
+      "listen_port": {{ singbox_hy2_port }},
+      "up_mbps": {{ singbox_hy2_up_mbps }},
+      "down_mbps": {{ singbox_hy2_down_mbps }},
+      "users": [
+        { "name": "hy2", "password": "{{ node_hy2_password }}" }
+      ],
+      "tls": {
+        "enabled": true,
+        "alpn": ["h3"],
+        "certificate_path": "{{ singbox_config_dir }}/hy2.crt",
+        "key_path": "{{ singbox_config_dir }}/hy2.key"
+      }
+    }
+{% endif %}
+  ],
+  "outbounds": [
+    { "type": "direct", "tag": "direct" }
+  ]{% if singbox_sni_routing_enabled | bool %},
+  "route": {
+    "rules": [
+      { "action": "sniff" },
+      {
+        "domain": [
+{% for domain in singbox_sni_domains %}
+          "{{ domain }}"{{ "," if not loop.last else "" }}
+{% endfor %}
+        ],
+        "action": "route",
+        "outbound": "direct",
+        "override_address": "{{ singbox_sni_tunnel_host }}",
+        "override_port": {{ singbox_sni_tunnel_port }}
+      }
+    ]
+  }{% endif %}
+
+}

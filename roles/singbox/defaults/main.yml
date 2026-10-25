@@ -1,0 +1,190 @@
+---
+# Native install (НЕ Docker) — edge-нода = минимум поверхности атаки.
+singbox_version: "1.13.13"       # ПИННУТО (latest stable 2026-06). Схема конфига зависит от версии — при bump гонять `sing-box check`.
+singbox_legacy_test_version: "1.11.15"
+singbox_arch: "amd64"            # amd64 (Hetzner CX23, cheapest) | arm64 (CAX11)
+# SHA-256 из assets[].digest официального GitHub Release v1.13.13. При bump
+# версии обновлять version и обе digest-записи одной правкой.
+singbox_checksums:
+  "1.11.15":
+    amd64: "sha256:950af37eb2d7e55dddae34a18411cd617303fd99d2dc75bc76b6dd9fcd97d9c5"
+  "1.13.13":
+    amd64: "sha256:bb99cabf47694625db421ee17898f36cdc1f9c2cb5decf65b12bac8d8437e842"
+    arm64: "sha256:d7fab87b921933eb281d8ee7bd5377cdd8228089f1f7c807c9363a6a2329286c"
+singbox_bin: /usr/local/bin/sing-box
+singbox_config_dir: /etc/sing-box
+singbox_service: sing-box        # systemd unit name
+singbox_user: singbox
+singbox_group: singbox
+
+# Canonical Reality server. sing-box keeps serving Hysteria2 on UDP/443;
+# Xray serves VLESS Reality on TCP/443. Set to singbox for rollback nodes.
+singbox_reality_server: xray        # xray | singbox
+
+# Synthetic role tests may use this fallback. Node inventory must declare its own.
+xray_version: "26.3.27"
+xray_arch_assets:
+  amd64: "64"
+  arm64: "arm64-v8a"
+xray_checksums:
+  # Рабочий профиль использует Xray 26.3.27 с dest/SNI www.samsung.com.
+  # Версия 25.10.15 оставлена для отката.
+  "25.10.15":
+    amd64: "sha256:df22ad60c1251c9fb63d7f85b3677872edf61c6715eba64b06adbfec658f4938"
+    arm64: "sha256:67ea391812f90fa17e29a60c8faa834bcf30ead0f84eb6b2bbd2d398d56b759e"
+  "26.3.27":
+    amd64: "sha256:23cd9af937744d97776ee35ecad4972cf4b2109d1e0fe6be9930467608f7c8ae"
+    arm64: "sha256:4d30283ae614e3057f730f67cd088a42be6fdf91f8639d82cb69e48cde80413c"
+xray_bin: /usr/local/bin/xray
+xray_config_dir: /etc/xray
+xray_service: xray
+xray_user: xray
+xray_group: xray
+
+# VLESS primary transport over TCP: Reality or publicly trusted TLS.
+singbox_vless_security: reality      # reality | tls
+singbox_reality_port: 443
+# sing-box 1.13.13 с этим профилем посылает X25519, и сервер Xray 26.x его
+# принимает. Поддержка ML-KEM у dest/SNI не обязательна.
+# На части сетей фильтр по SNI вызывает "REALITY: processed invalid connection".
+# Dest должен поддерживать TLS 1.3 и h2; влияние версии Xray и SNI
+# на конкретном пути следует проверять отдельно.
+singbox_reality_dest: "www.samsung.com"
+singbox_reality_sni: "www.samsung.com"
+# Для legacy sing-box Reality сохраняем проверенный профиль randomized.
+singbox_reality_fingerprints:
+  xray: chrome
+  singbox: randomized
+singbox_vless_tls_server_name: ""
+singbox_vless_tls_source_dir: "/etc/letsencrypt/live/{{ singbox_vless_tls_server_name }}"
+singbox_vless_tls_certificate_path: /etc/sing-box/vless.crt
+singbox_vless_tls_key_path: /etc/sing-box/vless.key
+
+# Hysteria2 (UDP фолбэк) — self-signed cert (клиент с insecure/pinned)
+singbox_hy2_enabled: true
+singbox_hy2_port: 443
+singbox_hy2_sni: "www.bing.com"   # CN self-signed серта (клиент всё равно insecure)
+singbox_hy2_up_mbps: 100
+singbox_hy2_down_mbps: 100
+
+singbox_log_level: warn
+
+# Клиенты, которым дополнительно нужен конфиг для sing-box 1.11.x.
+singbox_legacy_client_names: []
+
+# Optional per-client physical interface pin for Linux full-tunnel clients.
+# Mobile clients must remain absent from this map.
+singbox_client_bind_interfaces: {}
+
+# Домены, которые ходят мимо тоннеля: RU-сервисы геоблокируют зарубежные
+# (тем более датацентровые) IP, через exit-ноду они отдают капчу или отказ.
+# Уходят в direct и по маршруту, и по DNS — резолв через тоннель вернул бы
+# CDN-адреса чужого региона. Пустой список = весь трафик в тоннель, как раньше.
+singbox_client_direct_domains:
+  - avito.ru
+  - avito.st
+  - ozon.ru
+  - ozone.ru
+  - ozon.travel
+  - yandex.ru
+  - yandex.net
+  - yandex.com
+  - ya.ru
+  - yastatic.net
+
+# Процессы, чей трафик идёт мимо тоннеля. Торренты: тысячи пиров по голым IP
+# (доменного фильтра не хватит), abuse-жалобы прилетели бы на ноду, и её канал
+# они бы выели. Имя = имя исполняемого файла процесса, без пути.
+# На телефонных клиентах правило просто ни во что не попадает.
+singbox_client_direct_processes:
+  - qbittorrent
+  - transmission-gtk
+  - transmission-daemon
+
+# Резолвер для singbox_client_direct_domains и singbox_client_direct_processes.
+# Простой UDP, а не DoH: DoH к 1.1.1.1 в РФ ненадёжен, а эти запросы и так идут
+# вне тоннеля.
+singbox_client_direct_dns: "1.1.1.1"
+
+# Один существующий клиент, чьи credentials используются только для локальных
+# transport probes. Артефакты остаются в gitignored clients/probe/.
+singbox_probe_client_name: "{{ node_clients[0].name }}"
+
+# Клиенты с UUID собираются из sops: node_<node_name>_clients.
+# В шаблоне используется переменная node_clients (мапится в tasks/main.yml).
+
+# ─── TUN: раздельная маршрутизация по UID ────────────────────────────────────
+# Пусто = туннелировать всю машину (поведение по умолчанию, как было).
+# Список UID = туннелировать только их, остальное идёт напрямую. Нужно
+# машинам двойного назначения: домашний сервер, который одновременно
+# остаётся рабочей станцией. Пример: [1000] (десктопный пользователь),
+# при этом root/devops (apt, docker, GitLab, Ansible) ходят мимо туннеля.
+singbox_tun_include_uid: []
+
+# auto_redirect отдельно — на случай, если он понадобится без фильтрации
+# по UID. При непустом singbox_tun_include_uid включается принудительно:
+# без него фильтрация по UID пропускает в туннель только UDP.
+singbox_tun_auto_redirect: false
+
+# Killswitch: глушить трафик, идущий мимо туннеля. По умолчанию включён — для
+# клиента с полным туннелем это правильно.
+#
+# Выключать на хостах, где туннель частичный (см. singbox_tun_include_uid) и
+# особенно там, где работает Docker: трафик контейнеров не имеет UID и под
+# фильтр не подходит, поэтому killswitch убивает сеть внутри контейнеров,
+# оставляя сеть хоста рабочей. Отладка этого стоит дорого — снаружи выглядит
+# как «Let'"'"'s Encrypt недоступен» или «образ не скачивается».
+singbox_tun_strict_route: true
+
+# Интерфейсы, чей входящий трафик auto_redirect трогать не должен.
+# Практически всегда это мосты Docker: docker0 и br-* у пользовательских сетей.
+singbox_tun_exclude_interface: []
+
+# Локальный резолвер и домены, которые к нему адресуются. Нужны на клиенте,
+# стоящем в сети, где часть имён обслуживается своим DNS: без этого внутреннее
+# имя уходит в туннель и разрешается публичным адресом.
+singbox_dns_local_server: ""
+singbox_dns_local_domains: []
+
+# Заворачивание приватных имён в обратный туннель, симметрично роли xray.
+# Клиент может идти как Reality (его держит xray), так и Hysteria2 (его держит
+# sing-box). Правило, поставленное только в один из двух, работает через раз —
+# иначе через другой протокол может открываться старый
+# инстанс, потому что трафик уходил по Hy2 мимо правила в xray.
+#
+# Имя из TLS-рукопожатия читается правилом `{"action": "sniff"}`: клиент
+# резолвит имя сам и присылает чужой адрес, поэтому разбирать надо SNI, а не DNS.
+# Переопределение адреса живёт В ПРАВИЛЕ, а не в direct-outbound: в sing-box
+# 1.13 поля override_* у outbound удалены (были объявлены устаревшими в 1.11).
+# В самом правиле обязателен `outbound`: без него `sing-box check` проходит, а
+# в работе каждое совпадение даёт `router: outbound not found` и обрыв
+# соединения. Проверка синтаксиса этого не ловит — только поведение.
+singbox_sni_routing_enabled: false
+singbox_sni_tunnel_host: 127.0.0.1
+singbox_sni_tunnel_port: 8443
+# Домены — координата конкретного парка, поэтому список пустой в роли и
+# заполняется в inventory ноды.
+singbox_sni_domains: []
+
+# Частичный туннель по именам. Пусто — клиент работает как раньше, весь трафик
+# в прокси. Непустой список вместе с singbox_client_final: direct даёт
+# обратное: наружу идёт всё, кроме перечисленных имён. Это режим для сервера,
+# которому нужен доступ к одному хосту за NAT, а не смена своего выхода.
+singbox_client_proxy_domains: []
+singbox_client_final: "proxy"
+
+# Режим клиента: tun (перехват всего стека) или proxy (слушать порт на
+# loopback). Серверам — proxy: у машины, которая сама обслуживает трафик,
+# перехватывать нечего, а терять сеть есть что.
+singbox_client_mode: "tun"
+singbox_client_listen_port: 2080
+
+# Заворачивание приватных имён в обратный туннель на стороне Xray. Симметрично
+# singbox_sni_routing_enabled: правило нужно в ОБОИХ прокси, потому что Reality
+# держит Xray, Hysteria2 — sing-box, и транспорт выбирает клиент. Поставленное
+# только в один из двух, оно работает через раз.
+xray_sni_routing_enabled: false
+xray_listen: "::"
+xray_listen_port: "{{ singbox_reality_port }}"
+xray_sni_domains: []
+xray_sni_tunnel_target: "127.0.0.1:8443"

@@ -1,0 +1,9 @@
+---
+- name: Restart sshd
+  ansible.builtin.service:
+    name: ssh
+    state: restarted
+
+- name: Validate sshd config (post-write)
+  ansible.builtin.command: sshd -t -f /etc/ssh/sshd_config
+  changed_when: false

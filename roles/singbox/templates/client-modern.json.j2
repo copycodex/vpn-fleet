@@ -1,0 +1,290 @@
+{#- Настройки конкретного клиента: общие значения ноды можно переопределить
+    поимённо через singbox_client_overrides. Телефоны и ноутбук продолжают
+    получать полный туннель, а сервер — только те имена, ради которых его
+    вообще подключили. #}
+{%- set _ov = (singbox_client_overrides | default({})).get(export_client.name, {}) %}
+{%- set _proxy_domains = _ov.proxy_domains | default(singbox_client_proxy_domains | default([])) %}
+{%- set _final = _ov.final | default(singbox_client_final | default('proxy')) %}
+{#- strict_route глушит всё, что идёт мимо туннеля. На рабочем месте это
+    killswitch и защита от утечки, на сервере — способ потерять управление
+    машиной, если sing-box поведёт себя не так. Поэтому переопределяется. #}
+{%- set _strict = _ov.strict_route | default(singbox_tun_strict_route | default(true)) %}
+{%- set _include_uid = _ov.include_uid | default(singbox_tun_include_uid | default([])) %}
+{%- set _exclude_interface = _ov.exclude_interface | default(singbox_tun_exclude_interface | default([])) %}
+{#- Режим клиента. `tun` — рабочее место: перехватывается весь стек, дальше
+    решают правила маршрутизации. `proxy` — сервер: sing-box только слушает
+    порт на loopback и никуда не лезет, а через него ходит один конкретный
+    потребитель. Разница не в удобстве: TUN с auto_route может направить
+    весь исходящий трафик infra, хотя маршрутом по умолчанию стоял direct.
+    Сервер, потерявший сеть, дороже любой прозрачности. #}
+{%- set _mode = _ov.mode | default(singbox_client_mode | default('tun')) %}
+{%- set _proxy_listen = _ov.listen_port | default(singbox_client_listen_port | default(2080)) %}
+{% set client_bind_interface = (singbox_client_bind_interfaces | default({})).get(export_client.name, '') %}
+{# Management-WireGuard: у клиента появляется адрес внутри mgmt-сети, если для
+   него заведён пир (scripts/add-wg-peer.sh). WireGuard уходит в "detour", то
+   есть внутрь VLESS/Hysteria2 — наружу WG-хендшейк не выходит и DPI его не
+   видит. Подсеть дублирует roles/wireguard/defaults, роль сюда не включается. #}
+{% set wg_subnet = wg_mgmt_subnet | default('10.88.0.0/24') %}
+{% set wg_matches = (node_wg | default({})).get('peers', []) |
+                    selectattr('name', 'equalto', export_client.name) | list %}
+{% set wg_peer = wg_matches[0] if wg_matches else none %}
+{# Optional infrastructure mesh endpoint. Unlike management-WireGuard, this
+   has multiple peers and uses the address/key supplied for one named client.
+   Its UDP packets can be pinned to Hy2 for an explicit transport experiment
+   instead of following the user-facing proxy selector. #}
+{% set mesh_only = singbox_export_mesh_only | default(false) %}
+{% set mesh_wg = (_ov.wireguard_endpoint | default(none)) if mesh_only else none %}
+{# Домены мимо тоннеля (RU-сервисы, режущие зарубежные IP). Их надо и
+   резолвить напрямую: ответ через exit-ноду указал бы на CDN чужого региона,
+   и direct-маршрут ниже упёрся бы именно в него. #}
+{% set direct_domains = singbox_client_direct_domains | default([]) %}
+{# Процессы мимо тоннеля (торрент-клиенты): их трафик — тысячи пиров по IP, а не
+   по доменам, поэтому фильтр только по имени процесса. Матчится ядром sing-box
+   через TUN-inbound; на телефонах список просто ни во что не попадает. #}
+{% set direct_processes = singbox_client_direct_processes | default([]) %}
+{% set has_direct_dns = direct_domains or direct_processes %}
+{
+  "log": { "level": "warn" },
+  "dns": {
+    "servers": [
+      { "tag": "proxy-dns", "type": "https", "server": "1.1.1.1", "detour": "proxy" }{% if has_direct_dns %},
+{# NB: без "detour": sing-box >=1.12 падает в рантайме на detour к direct-
+   outbound без опций ("detour to an empty direct outbound makes no sense"),
+   а `sing-box check` это НЕ ловит. udp-сервер без detour и так ходит напрямую. #}
+      { "tag": "direct-dns", "type": "udp", "server": "{{ singbox_client_direct_dns }}" }{% endif %}
+    ],
+{% if has_direct_dns %}
+    "rules": [
+{% if direct_domains %}
+      { "domain_suffix": {{ direct_domains | to_json }}, "server": "direct-dns" }{% if direct_processes %},{% endif %}
+
+{% endif %}
+{% if direct_processes %}
+{# Трекеры торрент-клиента резолвим тоже мимо ноды: иначе на ноде видно, что мы
+   качаем, а анонс уйдёт с чужого региона. #}
+      { "process_name": {{ direct_processes | to_json }}, "server": "direct-dns" }
+{% endif %}
+    ],
+{% endif %}
+    "final": "proxy-dns",
+    "strategy": "ipv4_only"
+  },
+  "inbounds": [
+{% if not mesh_only %}
+{%- if _mode == 'proxy' %}
+    {
+      "type": "mixed",
+      "tag": "proxy-in",
+      "listen": "{{ _ov.listen | default('127.0.0.1') }}",
+      "listen_port": {{ _proxy_listen }}
+    }
+{%- else %}
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+      "auto_route": true,
+{#
+   strict_route — killswitch: он глушит весь трафик, идущий мимо туннеля, чтобы
+   при падении VPN ничего не утекло напрямую.
+
+   На хосте с раздельной маршрутизацией по UID это противоречие: там трафик
+   МИМО туннеля — штатный, так и задумано. Первым под killswitch попадает
+   Docker: пакеты, форвардящиеся из контейнерных мостов, не имеют UID вообще,
+   под include_uid не подходят, в туннель не направляются — и глушатся.
+   Симптом обманчив: с хоста curl работает, docker pull работает (его делает
+   демон с хоста), а изнутри любого контейнера сеть мертва.
+#}
+      "strict_route": {{ _strict | to_json }},
+{% if _include_uid %}
+{# Туннелировать только перечисленные UID, остальное — напрямую. Нужно
+   машинам двойного назначения: десктопная сессия пользователя идёт через
+   VPN, а системные службы (apt, docker, Ansible, серверные сервисы) ходят
+   мимо. Без этого full-tunnel на сервере ломает apt и делает домашнюю
+   инфраструктуру зависимой от доступности edge.
+
+   auto_redirect обязателен вместе с фильтрацией по UID. Без него в туннель
+   попадает только UDP: правила маршрутизации отправляют пакеты нужного UID
+   в tun, но TCP-соединения sing-box не перехватывает, и они молча пропадают.
+   Симптом — DNS работает, всё остальное висит. #}
+      "include_uid": {{ _include_uid | to_json }},
+      "auto_redirect": true,
+{% if _exclude_interface %}
+{#
+   auto_redirect вешает правило и на хук prerouting — через него проходит
+   трафик, ФОРВАРДЯЩИЙСЯ с других интерфейсов. Это нужно, когда машина
+   раздаёт туннель соседям по сети, и вредно, когда на ней просто есть Docker:
+   пакеты из контейнерных мостов уходят в nfqueue, у них нет UID, решения по
+   ним нет — и связь внутри контейнеров умирает при живой связи на хосте.
+#}
+      "exclude_interface": {{ _exclude_interface | to_json }},
+{% endif %}
+{% elif singbox_tun_auto_redirect | default(false) %}
+      "auto_redirect": true,
+{% endif %}
+      "stack": "system"
+    }
+{%- endif %}
+{% endif %}
+  ],
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "proxy",
+      "outbounds": ["auto", "vless-{{ singbox_vless_security }}"{% if singbox_hy2_enabled %}, "hy2"{% endif %}],
+      "default": "auto"
+    },
+    {
+      "type": "urltest",
+      "tag": "auto",
+      "outbounds": ["vless-{{ singbox_vless_security }}"{% if singbox_hy2_enabled %}, "hy2"{% endif %}],
+{# Keep this URL IP-based: proxy DNS itself depends on the selected outbound. #}
+      "url": "https://1.1.1.1/cdn-cgi/trace",
+      "interval": "3m"
+    },
+    {
+      "type": "vless",
+      "tag": "vless-{{ singbox_vless_security }}",
+      "server": "{{ ansible_host }}",
+      "server_port": {{ singbox_reality_port }},
+      "uuid": "{{ export_client.uuid }}",
+      "flow": "xtls-rprx-vision",
+{% if client_bind_interface %}
+      "bind_interface": "{{ client_bind_interface }}",
+{% endif %}
+      "tls": {
+        "enabled": true,
+        "server_name": "{{ singbox_vless_tls_server_name if singbox_vless_security == 'tls' else singbox_reality_sni }}"{% if singbox_vless_security == 'reality' %},
+        "utls": { "enabled": true, "fingerprint": "{{ singbox_reality_fingerprints[singbox_reality_server] }}" },
+        "reality": {
+          "enabled": true,
+          "public_key": "{{ node_reality_public_key }}",
+          "short_id": "{{ node_reality_short_id }}"
+        }
+{% endif %}
+      }
+    }{% if singbox_hy2_enabled %},
+    {
+      "type": "hysteria2",
+      "tag": "hy2",
+      "server": "{{ ansible_host }}",
+      "server_port": {{ singbox_hy2_port }},
+      "password": "{{ node_hy2_password }}",
+{% if client_bind_interface %}
+      "bind_interface": "{{ client_bind_interface }}",
+{% endif %}
+      "tls": {
+        "enabled": true,
+        "server_name": "{{ singbox_hy2_sni }}",
+        "certificate_public_key_sha256": ["{{ node_hy2_certificate_public_key_sha256 }}"],
+        "alpn": ["h3"]
+      }
+    }{% endif %},
+    { "type": "direct", "tag": "direct" }
+  ],
+{% if wg_peer or mesh_wg %}
+  "endpoints": [
+{% if wg_peer %}
+    {
+      "type": "wireguard",
+      "tag": "wg-mgmt",
+      "system": false,
+      "mtu": {{ wg_mgmt_mtu | default(1420) }},
+      "address": ["{{ wg_peer.address }}/32"],
+      "private_key": "{{ wg_peer.private_key }}",
+      "peers": [
+        {
+          "address": "127.0.0.1",
+          "port": {{ wg_mgmt_listen_port | default(51820) }},
+          "public_key": "{{ node_wg.server_public_key }}",
+          "allowed_ips": ["{{ wg_subnet }}"],
+          "persistent_keepalive_interval": {{ wg_mgmt_persistent_keepalive | default(25) }}
+        }
+      ],
+      "detour": "proxy"
+    }{% if mesh_wg %},{% endif %}
+{% endif %}
+{% if mesh_wg %}
+    {
+      "type": "wireguard",
+      "tag": "{{ mesh_wg.tag }}",
+      "system": {{ mesh_wg.system | default(false) | to_json }},
+{% if mesh_wg.name | default('') %}
+      "name": "{{ mesh_wg.name }}",
+{% endif %}
+      "mtu": {{ mesh_wg.mtu }},
+      "address": ["{{ mesh_wg.address }}"],
+      "private_key": "{{ export_client.wireguard_private_key }}",
+      "peers": [
+{% for peer in mesh_wg.peers %}
+        {
+          "address": "{{ peer.endpoint_address }}",
+          "port": {{ peer.endpoint_port }},
+          "public_key": "{{ peer.public_key }}",
+          "allowed_ips": ["{{ peer.allowed_ip }}"],
+          "persistent_keepalive_interval": {{ peer.persistent_keepalive | default(25) }}
+        }{% if not loop.last %},{% endif %}
+{% endfor %}
+      ],
+      "detour": "{{ mesh_wg.detour }}"
+    }
+{% if mesh_wg.lan_endpoint is defined %},
+    {
+      "type": "wireguard",
+      "tag": "{{ mesh_wg.lan_endpoint.tag }}",
+      "system": true,
+      "name": "{{ mesh_wg.lan_endpoint.name }}",
+      "mtu": {{ mesh_wg.mtu }},
+      "address": ["{{ mesh_wg.lan_endpoint.address }}"],
+      "private_key": "{{ export_client.wireguard_private_key }}",
+      "listen_port": {{ mesh_wg.lan_endpoint.listen_port }},
+      "peers": [
+{% for peer in mesh_wg.lan_endpoint.peers %}
+        {
+          "address": "{{ peer.endpoint_address }}",
+          "port": {{ peer.endpoint_port }},
+          "public_key": "{{ peer.public_key }}",
+          "allowed_ips": ["{{ peer.allowed_ip }}"],
+          "persistent_keepalive_interval": {{ peer.persistent_keepalive | default(0) }}
+        }{% if not loop.last %},{% endif %}
+{% endfor %}
+      ]
+    }
+{% endif %}
+{% endif %}
+  ],
+{% endif %}
+  "route": {
+    "rules": [
+      { "action": "sniff" },
+      { "protocol": "dns", "action": "hijack-dns" },
+{% if wg_peer %}
+{# Обязательно ВЫШЕ ip_is_private: mgmt-подсеть приватная и иначе ушла бы в direct. #}
+      { "ip_cidr": ["{{ wg_subnet }}"], "outbound": "wg-mgmt" },
+{% endif %}
+{% if mesh_wg %}
+      { "ip_cidr": ["{{ mesh_wg.route_cidr }}"], "outbound": "{{ mesh_wg.tag }}" },
+{% endif %}
+      { "ip_cidr": ["{{ node_bypass_cidr }}"], "outbound": "direct" },
+{% if direct_domains %}
+{# Матчится по имени из sniff, поэтому работает и для доменов, чьи IP гуляют. #}
+      { "domain_suffix": {{ direct_domains | to_json }}, "outbound": "direct" },
+{% endif %}
+{% if direct_processes %}
+{# Торренты в обход тоннеля: и чтобы не ловить abuse-жалобы на ноду, и чтобы
+   пиры не съедали её канал. Пиры ходят по голым IP — ловим по процессу. #}
+      { "process_name": {{ direct_processes | to_json }}, "outbound": "direct" },
+{% endif %}
+      { "ip_is_private": true, "outbound": "direct" }
+{%- if _proxy_domains %},
+      {#- Частичный туннель по именам: в прокси уходит только перечисленное,
+          остальное идёт напрямую (final ниже). Так клиент на сервере получает
+          доступ к одному имени, не отдавая туда весь свой трафик. #}
+      { "domain_suffix": {{ _proxy_domains | to_json }}, "outbound": "proxy" }
+{%- endif %}
+    ],
+    "final": "{{ _final }}",
+    "auto_detect_interface": true,
+    "default_domain_resolver": { "server": "proxy-dns" }
+  }
+}

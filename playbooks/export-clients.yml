@@ -1,0 +1,438 @@
+---
+# Экспорт client JSON + VLESS URL + QR на localhost. Credential-bearing tasks
+# всегда no_log; в stdout попадает только список путей.
+- name: Export client configs
+  hosts: all
+  gather_facts: false
+  vars:
+    clients_dir: "{{ playbook_dir }}/../clients"
+    probe_dir: "{{ clients_dir }}/probe"
+    singbox_export_bin: sing-box
+    singbox_legacy_bin: sing-box-1.11
+  tasks:
+    - name: Загрузить role defaults и per-node секреты
+      ansible.builtin.include_role:
+        name: singbox
+        tasks_from: secrets_map
+        public: true
+
+    - name: Verify Reality pair before exporting clients
+      ansible.builtin.import_role:
+        name: singbox
+        tasks_from: reality_keypair
+
+    - name: Выбрать клиентов для экспорта
+      ansible.builtin.set_fact:
+        export_clients: >-
+          {{ node_clients if client_filter is not defined else
+             (node_clients | selectattr('name', 'equalto', client_filter) | list) }}
+        node_bypass_cidr: "{{ ansible_host }}/{{ '128' if ':' in ansible_host else '32' }}"
+      no_log: true
+
+    - name: Проверить данные экспорта и безопасные имена файлов
+      ansible.builtin.assert:
+        that:
+          - node_name is match('^[a-z0-9][a-z0-9-]{0,62}$')
+          - singbox_vless_security != 'reality' or node_reality_public_key | length > 0
+          - >-
+            singbox_vless_security != 'reality' or
+            node_reality_short_id is match('^[0-9a-fA-F]{16}$')
+          - singbox_vless_security != 'tls' or singbox_vless_tls_server_name | length > 0
+          - not singbox_hy2_enabled or node_hy2_password | length >= 32
+          - >-
+            not singbox_hy2_enabled or
+            node_hy2_password not in (node_clients | map(attribute='uuid') | list)
+          - >-
+            not singbox_hy2_enabled or
+            node_hy2_certificate is search('^-----BEGIN CERTIFICATE-----')
+          - >-
+            not singbox_hy2_enabled or
+            node_hy2_certificate_public_key_sha256 is
+            match('^[A-Za-z0-9+/]{43}=$')
+          - export_clients | length > 0
+          - >-
+            (export_clients | map(attribute='name') | unique | list | length) ==
+            (export_clients | length)
+          - >-
+            (export_clients | map(attribute='name') |
+             select('match', '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$') |
+             list | length) == (export_clients | length)
+          - >-
+            (export_clients | map(attribute='uuid') |
+             select('match', '^[0-9a-fA-F-]{36}$') |
+             list | length) == (export_clients | length)
+        fail_msg: >-
+          Некорректные/пустые export credentials либо небезопасное имя node/client.
+        quiet: true
+      no_log: true
+
+    - name: Выбрать legacy-клиентов
+      ansible.builtin.set_fact:
+        legacy_export_clients: >-
+          {{ export_clients |
+             selectattr('name', 'in', singbox_legacy_client_names) | list }}
+      no_log: true
+
+    - name: Выбрать credential для transport probes
+      ansible.builtin.assert:
+        that:
+          - singbox_probe_client_name in (node_clients | map(attribute='name') | list)
+        fail_msg: "singbox_probe_client_name отсутствует в node_clients"
+        quiet: true
+      no_log: true
+
+    - name: Смапить credential для transport probes
+      ansible.builtin.set_fact:
+        probe_client: >-
+          {{ (node_clients |
+              selectattr('name', 'equalto', singbox_probe_client_name) |
+              list | first) }}
+      no_log: true
+
+    - name: Проверить локальную версию sing-box
+      ansible.builtin.command:
+        argv:
+          - "{{ singbox_export_bin }}"
+          - version
+      delegate_to: localhost
+      become: false
+      register: _export_singbox_version
+      changed_when: false
+      failed_when: false
+
+    - name: Проверить qrencode
+      ansible.builtin.command:
+        argv:
+          - qrencode
+          - --version
+      delegate_to: localhost
+      become: false
+      register: _qrencode_version
+      changed_when: false
+      failed_when: false
+
+    - name: Assert — локальные зависимости экспорта готовы
+      ansible.builtin.assert:
+        that:
+          - _export_singbox_version.rc == 0
+          - >-
+            (_export_singbox_version.stdout | default('')) is
+            search('(?m)^sing-box version ' ~ singbox_version ~ '$')
+          - _qrencode_version.rc == 0
+        fail_msg: >-
+          Нужны sing-box {{ singbox_version }} и qrencode в PATH control node.
+
+    - name: Проверить legacy binary
+      ansible.builtin.command:
+        argv:
+          - "{{ singbox_legacy_bin }}"
+          - version
+      delegate_to: localhost
+      become: false
+      register: _legacy_singbox_version
+      changed_when: false
+      failed_when: false
+      when: legacy_export_clients | length > 0
+
+    - name: Предупредить о пропуске legacy validation
+      ansible.builtin.debug:
+        msg: >-
+          {{ singbox_legacy_bin }} отсутствует: legacy JSON будет создан,
+          но его schema validation пропущена.
+      when:
+        - legacy_export_clients | length > 0
+        - (_legacy_singbox_version.rc | default(1)) != 0
+
+    - name: Создать приватный каталог clients
+      ansible.builtin.file:
+        path: "{{ clients_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+
+    - name: Создать приватный каталог transport probes
+      ansible.builtin.file:
+        path: "{{ probe_dir }}"
+        state: directory
+        mode: "0700"
+      delegate_to: localhost
+      become: false
+
+    - name: Рендер transport probe configs
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/singbox/templates/probe.json.j2"
+        dest: "{{ probe_dir }}/{{ node_name }}-{{ probe_transport }}.json"
+        mode: "0600"
+      loop: "{{ ['vless'] + (['hy2'] if singbox_hy2_enabled else []) }}"
+      loop_control:
+        loop_var: probe_transport
+        label: "{{ probe_transport }}"
+      vars:
+        export_client: "{{ probe_client }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Валидировать transport probe configs
+      ansible.builtin.command:
+        argv:
+          - "{{ singbox_export_bin }}"
+          - check
+          - -c
+          - "{{ probe_dir }}/{{ node_name }}-{{ probe_transport }}.json"
+      loop: "{{ ['vless'] + (['hy2'] if singbox_hy2_enabled else []) }}"
+      loop_control:
+        loop_var: probe_transport
+        label: "{{ probe_transport }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+
+    - name: Записать secret-free manifest для probes
+      ansible.builtin.copy:
+        dest: "{{ probe_dir }}/{{ node_name }}.manifest"
+        mode: "0600"
+        content: |
+          {{ node_name }}	{{ ansible_host }}	{{ ansible_user }}@{{ ansible_host }}	{{ ansible_port | default(22) }}	{{ ansible_ssh_private_key_file }}
+      delegate_to: localhost
+      become: false
+
+    - name: Найти существующие client artifacts
+      ansible.builtin.find:
+        paths: "{{ clients_dir }}"
+        file_type: file
+        recurse: false
+      delegate_to: localhost
+      become: false
+      register: _existing_client_files
+
+    - name: Закрепить 0600 на существующих client artifacts
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        mode: "0600"
+      loop: "{{ _existing_client_files.files }}"
+      loop_control:
+        label: "{{ item.path | basename }}"
+      delegate_to: localhost
+      become: false
+
+    - name: Рендер modern client JSON
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/singbox/templates/client-modern.json.j2"
+        dest: "{{ clients_dir }}/{{ node_name }}-{{ export_client.name }}.json"
+        mode: "0600"
+      loop: "{{ export_clients }}"
+      loop_control:
+        loop_var: export_client
+        label: "{{ export_client.name }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Валидировать modern client JSON
+      ansible.builtin.command:
+        argv:
+          - "{{ singbox_export_bin }}"
+          - check
+          - -c
+          - "{{ clients_dir }}/{{ export_client.name | regex_replace('^', node_name ~ '-') }}.json"
+      loop: "{{ export_clients }}"
+      loop_control:
+        loop_var: export_client
+        label: "{{ export_client.name }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+
+    - name: Select clients with a dedicated WireGuard endpoint
+      ansible.builtin.set_fact:
+        mesh_export_clients: >-
+          {{ export_clients |
+             selectattr('name', 'in',
+               (singbox_client_overrides | default({}) | dict2items |
+                selectattr('value.wireguard_endpoint', 'defined') |
+                map(attribute='key') | list)) | list }}
+      no_log: true
+
+    - name: Render dedicated WireGuard endpoint configs
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/singbox/templates/client-modern.json.j2"
+        dest: "{{ clients_dir }}/{{ node_name }}-{{ export_client.name }}-mesh.json"
+        mode: "0600"
+      loop: "{{ mesh_export_clients }}"
+      loop_control:
+        loop_var: export_client
+        label: "{{ export_client.name }}"
+      vars:
+        singbox_export_mesh_only: true
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Validate dedicated WireGuard endpoint configs
+      ansible.builtin.command:
+        argv:
+          - "{{ singbox_export_bin }}"
+          - check
+          - -c
+          - "{{ clients_dir }}/{{ node_name }}-{{ export_client.name }}-mesh.json"
+      loop: "{{ mesh_export_clients }}"
+      loop_control:
+        loop_var: export_client
+        label: "{{ export_client.name }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+
+    - name: Рендер legacy client JSON
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/singbox/templates/client-legacy.json.j2"
+        dest: "{{ clients_dir }}/{{ node_name }}-{{ export_client.name }}-legacy.json"
+        mode: "0600"
+      loop: "{{ legacy_export_clients }}"
+      loop_control:
+        loop_var: export_client
+        label: "{{ export_client.name }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Валидировать legacy client JSON
+      ansible.builtin.command:
+        argv:
+          - "{{ singbox_legacy_bin }}"
+          - check
+          - -c
+          - "{{ clients_dir }}/{{ node_name }}-{{ export_client.name }}-legacy.json"
+      loop: "{{ legacy_export_clients }}"
+      loop_control:
+        loop_var: export_client
+        label: "{{ export_client.name }}"
+      delegate_to: localhost
+      become: false
+      changed_when: false
+      no_log: true
+      when: (_legacy_singbox_version.rc | default(1)) == 0
+
+    - name: Read exported Hysteria2 client artifacts
+      ansible.builtin.slurp:
+        src: "{{ item }}"
+      loop: >-
+        {{ (export_clients | map(attribute='name') |
+            map('regex_replace', '^(.*)$', clients_dir ~ '/' ~ node_name ~ '-\1.json') |
+            list) +
+           (mesh_export_clients | map(attribute='name') |
+            map('regex_replace', '^(.*)$', clients_dir ~ '/' ~ node_name ~ '-\1-mesh.json') |
+            list) +
+           (legacy_export_clients | map(attribute='name') |
+            map('regex_replace', '^(.*)$', clients_dir ~ '/' ~ node_name ~ '-\1-legacy.json') |
+            list) +
+           ([probe_dir ~ '/' ~ node_name ~ '-hy2.json']
+            if singbox_hy2_enabled else []) }}
+      register: _exported_hy2_artifacts
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Assert exported Hysteria2 credentials and trust
+      vars:
+        _artifact_json: "{{ item.content | b64decode | from_json }}"
+        _hy2_outbound: >-
+          {{ _artifact_json.outbounds |
+             selectattr('type', 'equalto', 'hysteria2') | first }}
+        _hy2_tls: "{{ _hy2_outbound.tls }}"
+      ansible.builtin.assert:
+        that:
+          - _hy2_outbound.password == node_hy2_password
+          - _hy2_outbound.password not in (node_clients | map(attribute='uuid') | list)
+          - _hy2_tls.insecure is not defined
+          - >-
+            (_hy2_tls.certificate_public_key_sha256 | default([])) ==
+            [node_hy2_certificate_public_key_sha256] or
+            (_hy2_tls.certificate | default('')) == node_hy2_certificate
+        fail_msg: Exported Hysteria2 client lacks independent credentials or trust.
+        quiet: true
+      loop: "{{ _exported_hy2_artifacts.results }}"
+      no_log: true
+
+    - name: Рендер VLESS URL
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/singbox/templates/client-vless.url.j2"
+        dest: "{{ clients_dir }}/{{ node_name }}-{{ export_client.name }}.url"
+        mode: "0600"
+      loop: "{{ export_clients }}"
+      loop_control:
+        loop_var: export_client
+        label: "{{ export_client.name }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      register: _client_url_results
+
+    - name: Проверить наличие QR artifacts
+      ansible.builtin.stat:
+        path: "{{ clients_dir }}/{{ export_client.name | regex_replace('^', node_name ~ '-') }}.png"
+      loop: "{{ export_clients }}"
+      loop_control:
+        loop_var: export_client
+        label: "{{ export_client.name }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      register: _client_qr_stats
+
+    - name: Сгенерировать QR с umask 077
+      ansible.builtin.command:
+        argv:
+          - /bin/bash
+          - -c
+          - >-
+            set -o pipefail; umask 077;
+            tr -d '\r\n' < "$1" | qrencode -o "$2"
+          - qrencode
+          - "{{ clients_dir }}/{{ qr_pair.0.export_client.name | regex_replace('^', node_name ~ '-') }}.url"
+          - "{{ clients_dir }}/{{ qr_pair.0.export_client.name | regex_replace('^', node_name ~ '-') }}.png"
+      loop: >-
+        {{ _client_url_results.results | zip(_client_qr_stats.results) | list }}
+      loop_control:
+        loop_var: qr_pair
+        label: "{{ qr_pair.0.export_client.name }}"
+      when: qr_pair.0.changed or not qr_pair.1.stat.exists
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Закрепить 0600 на QR artifacts
+      ansible.builtin.file:
+        path: "{{ clients_dir }}/{{ export_client.name | regex_replace('^', node_name ~ '-') }}.png"
+        mode: "0600"
+      loop: "{{ export_clients }}"
+      loop_control:
+        loop_var: export_client
+        label: "{{ export_client.name }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Собрать список созданных файлов без credentials
+      ansible.builtin.set_fact:
+        exported_files: >-
+          {{ (export_clients | map(attribute='name') |
+              map('regex_replace', '^(.*)$', clients_dir ~ '/' ~ node_name ~ '-\1.json') | list) +
+             (export_clients | map(attribute='name') |
+              map('regex_replace', '^(.*)$', clients_dir ~ '/' ~ node_name ~ '-\1.url') | list) +
+             (export_clients | map(attribute='name') |
+              map('regex_replace', '^(.*)$', clients_dir ~ '/' ~ node_name ~ '-\1.png') | list) +
+             (legacy_export_clients | map(attribute='name') |
+              map('regex_replace', '^(.*)$', clients_dir ~ '/' ~ node_name ~ '-\1-legacy.json') | list) +
+             ([probe_dir ~ '/' ~ node_name ~ '-vless.json'] +
+              ([probe_dir ~ '/' ~ node_name ~ '-hy2.json'] if singbox_hy2_enabled else []) +
+              [probe_dir ~ '/' ~ node_name ~ '.manifest']) }}
+
+    - name: Экспорт завершён
+      ansible.builtin.debug:
+        var: exported_files

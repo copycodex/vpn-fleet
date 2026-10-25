@@ -1,0 +1,1 @@
+vless://00000000-0000-0000-0000-000000000000@192.0.2.10:443?type=tcp&security=reality&flow=xtls-rprx-vision&sni=www.apple.com&fp=chrome&pbk=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA&sid=0000000000000000#example-client

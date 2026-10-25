@@ -1,0 +1,97 @@
+---
+- name: Exercise recoverable Xray deployment with synthetic inputs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    node_name: ci
+    singbox_client_names: [recovery-smoke]
+    singbox_bin: /tmp/vpn-fleet-xray-recovery/bin/sing-box
+    singbox_config_dir: /tmp/vpn-fleet-xray-recovery/sing-box
+    singbox_service: sing-box-recovery-smoke
+    singbox_user: root
+    singbox_group: root
+    singbox_hy2_enabled: false
+    singbox_reality_server: xray
+    singbox_reality_dest: www.apple.com
+    singbox_reality_sni: www.apple.com
+    singbox_sni_routing_enabled: false
+    xray_bin: /tmp/vpn-fleet-xray-recovery/bin/xray
+    xray_config_dir: /tmp/vpn-fleet-xray-recovery/xray
+    xray_service: xray-recovery-smoke
+    xray_user: root
+    xray_group: root
+    xray_sni_routing_enabled: false
+  pre_tasks:
+    - name: Create the synthetic keygen directory
+      ansible.builtin.file:
+        path: /tmp/vpn-fleet-xray-recovery/keygen
+        state: directory
+        mode: "0700"
+      changed_when: false
+
+    - name: Download the pinned Xray release for synthetic key generation
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/XTLS/Xray-core/releases/download/v{{ xray_version }}/Xray-linux-{{ xray_arch_assets[singbox_arch] }}.zip
+        dest: /tmp/vpn-fleet-xray-recovery/keygen/xray.zip
+        mode: "0600"
+        checksum: "{{ xray_checksums[xray_version][singbox_arch] }}"
+      changed_when: false
+
+    - name: Extract the pinned Xray release for synthetic key generation
+      ansible.builtin.unarchive:
+        src: /tmp/vpn-fleet-xray-recovery/keygen/xray.zip
+        dest: /tmp/vpn-fleet-xray-recovery/keygen
+        remote_src: true
+        creates: /tmp/vpn-fleet-xray-recovery/keygen/xray
+      changed_when: false
+
+    - name: Check the synthetic Reality private key cache
+      ansible.builtin.stat:
+        path: /tmp/vpn-fleet-xray-recovery/reality-private-key
+      register: _recovery_private_key_file
+      changed_when: false
+      no_log: true
+
+    - name: Generate a synthetic Reality private key
+      ansible.builtin.command:
+        argv:
+          - /tmp/vpn-fleet-xray-recovery/keygen/xray
+          - x25519
+      register: _recovery_private_key
+      changed_when: false
+      when: not _recovery_private_key_file.stat.exists
+      no_log: true
+
+    - name: Cache the synthetic Reality private key
+      ansible.builtin.copy:
+        content: >-
+          {{ (_recovery_private_key.stdout |
+              regex_search('(?m)^PrivateKey: ([^ ]+)$', '\1')) | first }}
+        dest: /tmp/vpn-fleet-xray-recovery/reality-private-key
+        mode: "0600"
+      changed_when: false
+      when: not _recovery_private_key_file.stat.exists
+      no_log: true
+
+    - name: Read the synthetic Reality private key
+      ansible.builtin.slurp:
+        src: /tmp/vpn-fleet-xray-recovery/reality-private-key
+      register: _recovery_private_key_cached
+      changed_when: false
+      no_log: true
+
+    - name: Set synthetic credentials for the role
+      ansible.builtin.set_fact:
+        node_ci_clients:
+          - name: recovery-smoke
+            uuid: 00000000-0000-4000-8000-000000000001
+        node_ci_reality_private_key: >-
+          {{ _recovery_private_key_cached.content | b64decode }}
+        node_ci_reality_public_key: synthetic-public-key
+        node_ci_reality_short_id: 0123456789abcdef
+      no_log: true
+
+  roles:
+    - role: singbox

@@ -1,0 +1,38 @@
+---
+# Common role defaults
+
+# Timezone for all managed hosts
+common_timezone: Europe/Berlin
+
+# Locale
+common_locale: en_US.UTF-8
+
+# Base utility packages (debugging, troubleshooting, common tooling)
+common_packages:
+  - htop
+  - vim
+  - git
+  - curl
+  - wget
+  - unzip
+  - tmux
+  - ncdu
+  - jq
+  - rsync
+  - net-tools
+  - dnsutils
+  - tree
+  - less
+
+# Packages to explicitly remove (Ubuntu default bloat)
+common_packages_remove:
+  - snapd
+  - ubuntu-advantage-tools
+
+# Whether to enable unattended security upgrades (replacing the apt
+# unattended-upgrades package with our own simpler config)
+common_enable_unattended_upgrades: true
+
+# System limits — apply to systemd unit defaults
+common_limits_nofile: 65536
+common_limits_nproc: 32768

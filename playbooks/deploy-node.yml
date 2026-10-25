@@ -1,0 +1,21 @@
+---
+# Деплой sing-box ноды (Reality + Hysteria2 + опц. WG-exit).
+- ansible.builtin.import_playbook: reality-preflight.yml
+- name: Deploy sing-box node
+  hosts: all
+  serial:
+    - 1
+    - "100%"
+  become: true
+  pre_tasks:
+    - name: Освободить публичный Reality-порт при переходе на прямой Xray
+      ansible.builtin.import_role:
+        name: reality_frontend_off
+      when: not (reality_frontend_enabled | default(false) | bool)
+      tags: [reality_frontend, singbox]
+  roles:
+    - role: singbox
+      tags: [singbox]
+    - role: reality_frontend
+      when: reality_frontend_enabled | bool
+      tags: [reality_frontend]
