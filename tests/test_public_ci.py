@@ -32,3 +32,25 @@ def test_public_workflow_scans_coordinates_and_all_shell_scripts():
         if isinstance(runners, str):
             runners = [runners]
         assert "self-hosted" not in runners
+
+
+def test_public_workflow_inputs_exist():
+    """Run this test in the exported snapshot to catch private-only inputs."""
+    for path in (
+        ".github/workflows/ci.yml",
+        ".ansible-lint",
+        ".yamllint",
+        "ansible.cfg",
+        "requirements-ci.txt",
+        "requirements.yml",
+        "roles/singbox/defaults/main.yml",
+        "scripts/scan-coordinates.sh",
+        "tests/inventory/nodes/ci.yml",
+        "tests/render-singbox-config.yml",
+    ):
+        assert (ROOT / path).is_file(), path
+
+    assert (ROOT / "tests/inventory").is_dir()
+    assert list((ROOT / "playbooks").glob("*.yml"))
+    assert list((ROOT / "tests").glob("test_*.py"))
+    assert list(ROOT.rglob("*.sh"))

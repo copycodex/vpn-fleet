@@ -10,6 +10,8 @@ permissions:
 jobs:
   validate:
     runs-on: ubuntu-24.04
+    container:
+      image: python:3.14.2-slim-bookworm
     env:
       ANSIBLE_CONFIG: ${{ github.workspace }}/ansible.cfg
       ANSIBLE_COLLECTIONS_PATH: ${{ github.workspace }}/.ansible/collections
@@ -18,21 +20,26 @@ jobs:
       ANSIBLE_INVENTORY: ${{ github.workspace }}/tests/inventory
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
     steps:
+      - name: Install system tools
+        run: |
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends age ca-certificates curl git haproxy jq make openssh-client openssl systemd unzip uuid-runtime
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with:
-          python-version: '3.14'
       - name: Install test tools
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends age ca-certificates curl git haproxy jq make openssh-client openssl shellcheck systemd unzip uuid-runtime
           python -m pip install --no-cache-dir -r requirements-ci.txt
           curl -fsSL --retry 5 -o /tmp/sops https://github.com/getsops/sops/releases/download/v3.9.1/sops-v3.9.1.linux.amd64
           echo 'cd795109851c3a483bbaa66d15d19ddb2227ac0352b39e25d96b67d51edb6225  /tmp/sops' | sha256sum -c -
-          sudo install -m 0755 /tmp/sops /usr/local/bin/sops
+          install -m 0755 /tmp/sops /usr/local/bin/sops
+          shellcheck_version=v0.11.0
+          curl -fsSL --retry 5 -o /tmp/shellcheck.tar.xz "https://github.com/koalaman/shellcheck/releases/download/${shellcheck_version}/shellcheck-${shellcheck_version}.linux.x86_64.tar.xz"
+          echo '8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  /tmp/shellcheck.tar.xz' | sha256sum -c -
+          tar -xJf /tmp/shellcheck.tar.xz -C /tmp
+          install -m 0755 "/tmp/shellcheck-${shellcheck_version}/shellcheck" /usr/local/bin/shellcheck
       - name: Shell lint
         run: |
           set -euo pipefail
@@ -77,6 +84,7 @@ jobs:
           curl -fsSL --retry 5 -o /tmp/sing-box.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
           echo "${SINGBOX_SHA256}  /tmp/sing-box.tar.gz" | sha256sum -c -
           tar -xzf /tmp/sing-box.tar.gz -C /tmp
+          install -m 0755 "/tmp/sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box" /usr/local/bin/sing-box
           curl -fsSL --retry 5 -o /tmp/sing-box-legacy.tar.gz "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_LEGACY_VERSION}/sing-box-${SINGBOX_LEGACY_VERSION}-linux-amd64.tar.gz"
           echo "${SINGBOX_LEGACY_SHA256}  /tmp/sing-box-legacy.tar.gz" | sha256sum -c -
           tar -xzf /tmp/sing-box-legacy.tar.gz -C /tmp
