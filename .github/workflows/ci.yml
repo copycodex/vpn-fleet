@@ -12,6 +12,9 @@ jobs:
     runs-on: ubuntu-24.04
     container:
       image: python:3.14.2-slim-bookworm
+    defaults:
+      run:
+        shell: bash
     env:
       ANSIBLE_CONFIG: ${{ github.workspace }}/ansible.cfg
       ANSIBLE_COLLECTIONS_PATH: ${{ github.workspace }}/.ansible/collections

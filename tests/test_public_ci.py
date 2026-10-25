@@ -34,6 +34,13 @@ def test_public_workflow_scans_coordinates_and_all_shell_scripts():
         assert "self-hosted" not in runners
 
 
+def test_container_jobs_run_with_bash():
+    workflow = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    for job in workflow["jobs"].values():
+        if "container" in job:
+            assert job.get("defaults", {}).get("run", {}).get("shell") == "bash"
+
+
 def test_public_workflow_inputs_exist():
     """Run this test in the exported snapshot to catch private-only inputs."""
     for path in (
