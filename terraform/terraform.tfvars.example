@@ -7,5 +7,5 @@ location       = "fsn1"    # EU: fsn1 / nbg1 / hel1
 image          = "ubuntu-24.04"
 node_role      = "edge-gateway"
 
-# Публичный ключ fleet-а: тот же, что в inventories/group_vars/all/ssh_keys.yml.
+# Публичный ключ fleet-а: тот же, что в inventories/group_vars/all/ssh_keys.yml.example.
 ssh_public_key = "ssh-ed25519 AAAA... fleet-key"

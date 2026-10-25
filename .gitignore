@@ -2,6 +2,7 @@
 # артефакт сборки, а provenance поставки — checksums исходного экспорта.
 
 # Secrets / decrypted
+/private/
 *.decrypted
 *.decrypted.*
 .env
@@ -14,12 +15,29 @@ keys.txt
 private/**/*.yml.dec
 private/**/*.plain
 
+# Working inventories stay local; only the named samples are publishable.
+/inventories/*
+!/inventories/hosters.yml
+!/inventories/first-entry.sops.yml.example
+!/inventories/known_hosts.example
+!/inventories/nodes/
+/inventories/nodes/*
+!/inventories/nodes/example.yml.template
+!/inventories/group_vars/
+/inventories/group_vars/*
+!/inventories/group_vars/all/
+/inventories/group_vars/all/*
+!/inventories/group_vars/all/secrets.sops.yml.example
+!/inventories/group_vars/all/ssh_keys.yml.example
+
 # Generated client configs (contain UUIDs)
 clients/*
 !clients/.gitkeep
 # Обезличенные примеры выпускаемых конфигов: форма без чьих-либо координат.
 # Реальные выпуски рядом остаются ignored.
-!clients/example-*
+!clients/example-client.json
+!clients/example-client-legacy.json
+!clients/example-client.url
 
 # Ansible
 *.retry

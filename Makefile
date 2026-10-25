@@ -153,12 +153,6 @@ test: ## Публичные тесты и render
 	yamllint .
 	python3 -m pytest
 
-.PHONY: test-private
-test-private: test ## Публичные тесты плюс гейты частного репозитория
-	scripts/check-public-tree.sh --index
-	scripts/check-private-secrets.sh --index
-	tests/check-public-tree.sh
-
 .PHONY: first-contact-stand-up first-contact-stand-down first-contact-stand
 first-contact-stand-up: ## Поднять локальный sshd-стенд первого входа
 	tests/first-contact-stand.sh up
