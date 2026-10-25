@@ -1,0 +1,7 @@
+---
+- hosts: localhost
+  connection: local
+  become: true
+  tasks:
+    - ansible.builtin.import_role:
+        name: reality_frontend_off

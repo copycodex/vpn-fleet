@@ -1,0 +1,29 @@
+[Unit]
+Description=sing-box client (TUN full-tunnel)
+# Order strictly after the network is actually online. Wants= alone only pulls
+# the target in; without After= sing-box races ahead and installs auto_route +
+# strict_route (the killswitch) onto a not-yet-up interface, which blocks all
+# traffic until a later retry -> "internet takes forever after reboot".
+After=network-online.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sing-box run -c /etc/sing-box/config.json
+# The VPN must always stay up: restart on both clean exit and crash.
+Restart=always
+RestartSec=3
+LimitNOFILE=infinity
+# TUN + auto_route/strict_route need CAP_NET_ADMIN.
+# The client does not bind 443 -> CAP_NET_BIND_SERVICE is not required.
+# The other two are what route rules with process_name (torrents outside the
+# tunnel) cost: sing-box must map a socket to its owning process, which means
+# reading another user's /proc/<pid>/fd (CAP_DAC_READ_SEARCH) and resolving
+# /proc/<pid>/exe (CAP_SYS_PTRACE). With CAP_NET_ADMIN
+# alone both are EACCES even as uid 0, and the process rule silently never
+# matches. Drop them and torrents go back through the node.
+AmbientCapabilities=CAP_NET_ADMIN CAP_DAC_READ_SEARCH CAP_SYS_PTRACE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_READ_SEARCH CAP_SYS_PTRACE
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+---
+galaxy_info:
+  role_name: common
+  author: vpn-fleet
+  description: Common baseline for all managed hosts
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble]
+dependencies: []

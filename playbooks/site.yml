@@ -1,0 +1,5 @@
+---
+# Steady-state converge ПОСЛЕ отдельного bootstrap: baseline, затем sing-box.
+- ansible.builtin.import_playbook: reality-preflight.yml
+- ansible.builtin.import_playbook: base.yml
+- ansible.builtin.import_playbook: deploy-node.yml

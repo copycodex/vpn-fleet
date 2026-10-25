@@ -1,0 +1,36 @@
+---
+# Firewall role defaults
+
+# Default policies
+firewall_default_incoming: deny
+firewall_default_outgoing: allow
+firewall_default_routed: deny
+
+# Whether to enable UFW logging
+firewall_logging: low  # off | low | medium | high | full
+
+# IPv6 support
+firewall_ipv6: true
+
+# Prefix embedded in comments for rules owned by this role.  Reconciliation
+# removes only stale rules carrying this marker; trusted SSH networks are
+# managed, while the SSH rate-limit and operator rules remain outside it.
+firewall_managed_rule_prefix: vpn-fleet
+
+# Public TCP and UDP port lists are required declarations in the node inventory.
+# An explicit [] means that no public ports of that protocol are open.
+
+# TCP ports allowed from specific source IPs only
+# Format: list of {port, source, comment}
+# Example for data server in Phase 7:
+#   firewall_allowed_tcp_ports_from:
+#     - { port: 5432, source: "10.0.0.0/24", comment: "Postgres from apps subnet" }
+firewall_allowed_tcp_ports_from: []
+
+
+# Whether to enable rate limiting on SSH (anti-bruteforce)
+firewall_ssh_rate_limit: true
+
+# CIDR-сети, из которых SSH разрешён без rate-limit (управляющая сеть парка).
+# Пусто по умолчанию: адрес сети задаётся в inventory ноды.
+firewall_ssh_allow_from: []

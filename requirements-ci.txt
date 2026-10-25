@@ -1,0 +1,6 @@
+ansible-core==2.21.2
+ansible-lint==26.6.0
+pexpect==4.9.0
+pytest==9.0.2
+PyYAML==6.0.3
+yamllint==1.38.0

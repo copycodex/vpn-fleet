@@ -1,0 +1,64 @@
+{
+  "log": { "loglevel": "{{ singbox_log_level }}" },
+  "inbounds": [
+    {
+      "listen": "{{ xray_listen | default('::') }}",
+      "port": {{ xray_listen_port | default(singbox_reality_port) }},
+      "protocol": "vless",
+      "tag": "vless-reality-in",
+      "settings": {
+        "clients": [
+{% for c in node_clients %}
+          { "id": "{{ c.uuid }}", "email": "{{ c.name }}", "flow": "xtls-rprx-vision" }{{ "," if not loop.last else "" }}
+{% endfor %}
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "show": false,
+          "dest": "{{ singbox_reality_dest }}:443",
+          "xver": 0,
+          "serverNames": ["{{ singbox_reality_sni }}"],
+          "privateKey": "{{ node_reality_private_key }}",
+          "shortIds": ["{{ node_reality_short_id }}"]
+        }
+      }{% if xray_sni_routing_enabled | bool %},
+{# Имя читается из TLS-рукопожатия: клиент резолвит его сам и присылает чужой
+   адрес, поэтому разбирать надо SNI, а не DNS. #}
+      "sniffing": { "enabled": true, "destOverride": ["tls"] }
+{% endif %}
+
+    }
+  ],
+  "outbounds": [
+    { "protocol": "freedom", "tag": "direct" }{% if xray_sni_routing_enabled | bool %},
+{# Совпавшее по SNI соединение идёт в локальный конец обратного туннеля. #}
+    {
+      "protocol": "freedom",
+      "tag": "reverse-tunnel",
+      "settings": { "redirect": "{{ xray_sni_tunnel_target }}" }
+    }
+{% endif %}
+
+  ]{% if xray_sni_routing_enabled | bool %},
+  "routing": {
+    "domainStrategy": "AsIs",
+    "rules": [
+      {
+        "type": "field",
+        "inboundTag": ["vless-reality-in"],
+        "domain": [
+{% for domain in xray_sni_domains %}
+          "full:{{ domain }}"{{ "," if not loop.last else "" }}
+{% endfor %}
+        ],
+        "outboundTag": "reverse-tunnel"
+      }
+    ]
+  }
+{% endif %}
+
+}

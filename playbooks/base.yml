@@ -1,0 +1,18 @@
+---
+# Базовая конфигурация ноды ПОСЛЕ bootstrap. Подключение devops@2424 из inventory.
+# Идемпотентно, гоняется повторно. sing-box — отдельно (deploy-node.yml).
+- name: Configure node (base)
+  hosts: all
+  become: true
+  pre_tasks:
+    - name: Validate firewall profile before configuring the node
+      ansible.builtin.import_role:
+        name: firewall
+        tasks_from: validate_profile
+  roles:
+    - common
+    - ssh_hardening
+    - role: ssh_authorized_keys
+      tags: [ssh_authorized_keys]
+    - role: firewall
+      tags: [firewall]

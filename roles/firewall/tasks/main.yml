@@ -1,0 +1,198 @@
+---
+# Firewall role: UFW configuration.
+# Order of operations is critical — we add allow rules BEFORE enabling
+# the firewall, otherwise we'd lose SSH on the first run.
+
+- name: Validate public firewall profile
+  ansible.builtin.import_tasks: validate_profile.yml
+
+- name: Reset firewall reconciliation state for this role invocation
+  ansible.builtin.set_fact:
+    firewall_managed_rule_ids: []
+    firewall_stale_rule_numbers: []
+    firewall_surviving_ssh_rule_numbers: []
+
+- name: Install UFW
+  ansible.builtin.apt:
+    name: ufw
+    state: present
+
+# ─── Configure UFW defaults & logging ────────────────────────────────────────
+
+- name: Configure UFW IPv6 support
+  ansible.builtin.lineinfile:
+    path: /etc/default/ufw
+    regexp: "^IPV6="
+    line: 'IPV6={{ "yes" if firewall_ipv6 else "no" }}'
+    state: present
+  notify: Reload UFW
+
+- name: Set UFW logging level
+  community.general.ufw:
+    logging: "{{ firewall_logging }}"
+
+# ─── Allow rules (must come BEFORE enable) ───────────────────────────────────
+
+- name: Build desired managed firewall rule identifiers
+  ansible.builtin.set_fact:
+    firewall_managed_rule_ids: >-
+      {{
+        ([firewall_managed_rule_prefix ~ ':tcp:any:' ~ (item.port | string)]
+         if firewall_managed_rule_kind == 'tcp_any'
+         else [firewall_managed_rule_prefix ~ ':tcp:' ~ item.source ~ ':' ~ (item.port | string)]
+         if firewall_managed_rule_kind == 'tcp_from'
+         else [firewall_managed_rule_prefix ~ ':udp:any:' ~ (item.port | string)])
+        + firewall_managed_rule_ids
+      }}
+  loop: >-
+    {{
+      (firewall_allowed_tcp_ports
+       | map('combine', {'firewall_managed_rule_kind': 'tcp_any'})
+       | list)
+      + (firewall_allowed_tcp_ports_from
+         | map('combine', {'firewall_managed_rule_kind': 'tcp_from'})
+         | list)
+      + (firewall_allowed_udp_ports
+         | map('combine', {'firewall_managed_rule_kind': 'udp_any'})
+         | list)
+    }}
+  vars:
+    firewall_managed_rule_kind: "{{ item.firewall_managed_rule_kind }}"
+
+- name: Add trusted SSH networks to desired managed rule identifiers
+  ansible.builtin.set_fact:
+    firewall_managed_rule_ids: >-
+      {{ firewall_managed_rule_ids + [firewall_managed_rule_prefix ~ ':tcp:' ~ item ~ ':' ~ (ssh_port | default(2424) | string)] }}
+  loop: "{{ firewall_ssh_allow_from }}"
+
+- name: Allow TCP ports from anywhere
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: tcp
+    comment: >-
+      {{ firewall_managed_rule_prefix }}:tcp:any:{{ item.port }}
+      {{ item.comment | default('') }}
+  loop: "{{ firewall_allowed_tcp_ports }}"
+
+- name: Allow TCP ports from specific sources
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: tcp
+    from_ip: "{{ item.source }}"
+    comment: >-
+      {{ firewall_managed_rule_prefix }}:tcp:{{ item.source }}:{{ item.port }}
+      {{ item.comment | default('') }}
+  loop: "{{ firewall_allowed_tcp_ports_from }}"
+  when: firewall_allowed_tcp_ports_from | length > 0
+
+- name: Allow UDP ports
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: udp
+    comment: >-
+      {{ firewall_managed_rule_prefix }}:udp:any:{{ item.port }}
+      {{ item.comment | default('') }}
+  loop: "{{ firewall_allowed_udp_ports }}"
+  when: firewall_allowed_udp_ports | length > 0
+
+# Сети, чей SSH не должен упираться в rate-limit (CI даёт >6 conn/30s).
+# Адрес сети — координата конкретного парка, поэтому он живёт в inventory,
+# а не в роли: с ним файл нельзя вынести в публичный экспорт.
+- name: Allow SSH from trusted networks (no rate limit)
+  community.general.ufw:
+    rule: allow
+    port: "{{ ssh_port | default(2424) }}"
+    proto: tcp
+    src: "{{ item }}"
+    comment: >-
+      {{ firewall_managed_rule_prefix }}:tcp:{{ item }}:{{ ssh_port | default(2424) }}
+      SSH from trusted network (no rate limit)
+  loop: "{{ firewall_ssh_allow_from }}"
+  when: firewall_ssh_allow_from | length > 0
+
+- name: Rate-limit SSH (anti-bruteforce)
+  community.general.ufw:
+    rule: limit
+    port: "{{ ssh_port | default(2424) }}"
+    proto: tcp
+    comment: "SSH rate-limit"
+  when: firewall_ssh_rate_limit
+
+# UFW has no selective purge primitive.  Numbered deletion lets us remove only
+# rules carrying our ownership marker, in reverse order so indices stay valid.
+- name: Inspect UFW rules for reconciliation
+  ansible.builtin.command:
+    argv:
+      - ufw
+      - status
+      - numbered
+  register: firewall_ufw_numbered_status
+  changed_when: false
+
+- name: Collect stale managed UFW rule numbers
+  ansible.builtin.set_fact:
+    firewall_stale_rule_numbers: >-
+      {{
+        firewall_stale_rule_numbers
+        + [(item | split(']') | first | regex_replace('[^0-9]', ''))]
+      }}
+  loop: "{{ firewall_ufw_numbered_status.stdout_lines }}"
+  vars:
+    firewall_rule_id: "{{ item | split('# ') | last | split(' ') | first }}"
+  when:
+    - item is search('# ' ~ firewall_managed_rule_prefix ~ ':')
+    - firewall_rule_id not in firewall_managed_rule_ids
+
+- name: Collect SSH rules that will survive reconciliation
+  ansible.builtin.set_fact:
+    firewall_surviving_ssh_rule_numbers: >-
+      {{ firewall_surviving_ssh_rule_numbers + [firewall_ssh_rule_number] }}
+  loop: "{{ firewall_ufw_numbered_status.stdout_lines }}"
+  vars:
+    firewall_ssh_rule_number: "{{ item | split(']') | first | regex_replace('[^0-9]', '') }}"
+  when:
+    - item is match('^\\[\\s*[0-9]+\\]\\s+' ~ (ssh_port | default(2424) | string) ~ '/tcp\\s+(ALLOW|LIMIT)( IN)?\\s+')
+    - firewall_ssh_rule_number not in firewall_stale_rule_numbers
+
+- name: Keep an SSH access rule before removing stale rules
+  ansible.builtin.assert:
+    that:
+      - firewall_ssh_rate_limit | bool or firewall_surviving_ssh_rule_numbers | length > 0
+    fail_msg: No SSH allow or limit rule would remain after reconciliation
+
+- name: Remove stale managed UFW rules
+  ansible.builtin.command:
+    argv:
+      - ufw
+      - --force
+      - delete
+      - "{{ item }}"
+  loop: >-
+    {{ firewall_stale_rule_numbers | map('int') | sort(reverse=true) }}
+  changed_when: true
+
+# ─── Default policies ────────────────────────────────────────────────────────
+
+- name: Set UFW default incoming policy
+  community.general.ufw:
+    direction: incoming
+    policy: "{{ firewall_default_incoming }}"
+
+- name: Set UFW default outgoing policy
+  community.general.ufw:
+    direction: outgoing
+    policy: "{{ firewall_default_outgoing }}"
+
+- name: Set UFW default routed policy
+  community.general.ufw:
+    direction: routed
+    policy: "{{ firewall_default_routed }}"
+
+# ─── Enable UFW (last step!) ─────────────────────────────────────────────────
+
+- name: Enable UFW
+  community.general.ufw:
+    state: enabled

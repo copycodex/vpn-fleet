@@ -1,0 +1,26 @@
+---
+- name: Require typed public firewall lists before changes
+  ansible.builtin.assert:
+    that:
+      - firewall_invalid_public_lists | length == 0
+    fail_msg: >-
+      {{ inventory_hostname }}: declare these public firewall variables as lists:
+      {{ firewall_invalid_public_lists | join(', ') }}
+  vars:
+    firewall_invalid_public_lists: >-
+      {{ (['firewall_allowed_tcp_ports'] if firewall_allowed_tcp_ports is not defined or firewall_allowed_tcp_ports is not sequence or firewall_allowed_tcp_ports is string or firewall_allowed_tcp_ports is mapping else [])
+         + (['firewall_allowed_udp_ports'] if firewall_allowed_udp_ports is not defined or firewall_allowed_udp_ports is not sequence or firewall_allowed_udp_ports is string or firewall_allowed_udp_ports is mapping else []) }}
+
+- name: Require a mapping with an integer port in each public firewall entry
+  ansible.builtin.assert:
+    that:
+      - item.1 is mapping
+      - item.1.port is defined
+      - item.1.port is integer
+    fail_msg: >-
+      {{ inventory_hostname }}: {{ item.0 }} entries must be mappings with an integer port
+  loop: >-
+    {{ (["firewall_allowed_tcp_ports"] | product(firewall_allowed_tcp_ports) | list)
+       + (["firewall_allowed_udp_ports"] | product(firewall_allowed_udp_ports) | list) }}
+  loop_control:
+    label: "{{ item.0 }} entry"

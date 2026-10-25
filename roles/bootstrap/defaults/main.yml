@@ -1,0 +1,27 @@
+---
+# Bootstrap role defaults
+
+# Managed user that will be created
+bootstrap_user: devops
+bootstrap_user_groups: [sudo]
+
+# SSH port to switch to after bootstrap
+bootstrap_ssh_port: 2424
+
+# Public SSH keys for the managed user come declaratively from
+# group_vars/all/ssh_keys.yml (ssh_authorized_keys_devops) — single source of
+# truth, same list the steady-state ssh_authorized_keys role uses.
+
+# Disable password authentication and root login after bootstrap
+bootstrap_disable_root_login: true
+bootstrap_disable_password_auth: true
+
+# Base packages required for any future Ansible run on this host
+bootstrap_base_packages:
+  - sudo
+  - python3
+  - python3-apt
+  - ca-certificates
+  - curl
+  - gnupg
+  - lsb-release

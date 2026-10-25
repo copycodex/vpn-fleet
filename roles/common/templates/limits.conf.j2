@@ -1,0 +1,10 @@
+# {{ ansible_managed }}
+# Increased system limits for production workloads.
+
+* soft nofile {{ common_limits_nofile }}
+* hard nofile {{ common_limits_nofile }}
+* soft nproc  {{ common_limits_nproc }}
+* hard nproc  {{ common_limits_nproc }}
+
+root soft nofile {{ common_limits_nofile }}
+root hard nofile {{ common_limits_nofile }}

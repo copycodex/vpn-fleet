@@ -1,0 +1,39 @@
+---
+- name: Поставить haproxy
+  ansible.builtin.apt:
+    name: haproxy
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Развернуть haproxy.cfg
+  ansible.builtin.template:
+    src: haproxy.cfg.j2
+    dest: /etc/haproxy/haproxy.cfg
+    owner: root
+    group: root
+    mode: "0644"
+    # Битый конфиг не доезжает до диска: haproxy проверяет его сам.
+    validate: haproxy -c -f %s
+  notify: reload haproxy
+
+- name: Включить и запустить haproxy
+  ansible.builtin.systemd:
+    name: haproxy
+    enabled: true
+    state: started
+
+- name: Применить конфигурацию HAProxy до проверки публичного порта
+  ansible.builtin.meta: flush_handlers
+
+- name: Проверить, что локальный Xray backend слушает
+  ansible.builtin.wait_for:
+    host: "{{ reality_frontend_backend_host }}"
+    port: "{{ reality_frontend_backend_port }}"
+    timeout: 10
+
+- name: Проверить, что публичный фронт слушает
+  ansible.builtin.wait_for:
+    host: 127.0.0.1
+    port: "{{ reality_frontend_bind_port }}"
+    timeout: 10

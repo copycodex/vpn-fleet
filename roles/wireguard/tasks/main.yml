@@ -1,0 +1,101 @@
+---
+# Management WireGuard на ноде. Секреты (ключи сервера и пиров) живут в SOPS
+# под node_<node>_wg и заводятся скриптом scripts/add-wg-peer.sh.
+
+- name: Смапить per-node WireGuard-секреты из SOPS
+  ansible.builtin.set_fact:
+    node_wg: >-
+      {{ ansible_facts[_wg_var] if _wg_var in ansible_facts else
+         lookup('vars', _wg_var, default={}) }}
+  vars:
+    _wg_var: "node_{{ node_name | replace('-', '_') }}_wg"
+  no_log: true
+
+- name: Assert — ключи сервера и хотя бы один пир заданы
+  ansible.builtin.assert:
+    that:
+      - node_wg.server_private_key | default('') | length > 0
+      - node_wg.server_public_key | default('') | length > 0
+      - node_wg.peers | default([]) | length > 0
+      - >-
+        (node_wg.peers | map(attribute='address') | unique | list | length) ==
+        (node_wg.peers | length)
+    fail_msg: >-
+      Нет WireGuard-секретов для {{ node_name }}. Заведи пира:
+      scripts/add-wg-peer.sh {{ node_name }} <peer-name>
+    quiet: true
+  no_log: true
+
+- name: Установить WireGuard
+  ansible.builtin.apt:
+    name: wireguard
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Включить форвардинг (пиры общаются между собой через ноду)
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    sysctl_set: true
+    state: present
+    reload: true
+
+- name: Каталог конфигурации WireGuard
+  ansible.builtin.file:
+    path: "{{ wg_mgmt_config_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0700"
+
+- name: Отрендерить {{ wg_mgmt_interface }}.conf
+  ansible.builtin.template:
+    src: wg-mgmt.conf.j2
+    dest: "{{ wg_mgmt_config_dir }}/{{ wg_mgmt_interface }}.conf"
+    owner: root
+    group: root
+    mode: "0600"
+  no_log: true
+  notify: Restart management wireguard
+
+# Порт 51820/udp снаружи НЕ открывается (default incoming deny). Разрешаем
+# только транзит между пирами внутри самого интерфейса.
+- name: Разрешить форвардинг между пирами внутри {{ wg_mgmt_interface }}
+  community.general.ufw:
+    rule: allow
+    route: true
+    interface_in: "{{ wg_mgmt_interface }}"
+    interface_out: "{{ wg_mgmt_interface }}"
+    comment: "WG mgmt peer-to-peer"
+
+- name: Включить и запустить wg-quick@{{ wg_mgmt_interface }}
+  ansible.builtin.systemd:
+    name: "wg-quick@{{ wg_mgmt_interface }}"
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Применить перезапуск немедленно, если конфиг изменился
+  ansible.builtin.meta: flush_handlers
+
+- name: Собрать состояние интерфейса
+  ansible.builtin.command:
+    argv:
+      - wg
+      - show
+      - "{{ wg_mgmt_interface }}"
+      - peers
+  register: _wg_peers
+  changed_when: false
+  no_log: true
+
+- name: Assert — все пиры на месте
+  ansible.builtin.assert:
+    that:
+      - _wg_peers.stdout_lines | length == (node_wg.peers | length)
+    fail_msg: >-
+      На интерфейсе {{ wg_mgmt_interface }} пиров
+      {{ _wg_peers.stdout_lines | length }}, ожидалось {{ node_wg.peers | length }}.
+    quiet: true
+  no_log: true

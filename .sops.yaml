@@ -1,0 +1,17 @@
+# sops creation rules — ОБРАЗЕЦ. Настоящий файл лежит в private/.sops.yaml и
+# несёт настоящего получателя age; здесь плейсхолдер, и так и должно быть.
+#
+# Правила два, потому что файлы шифруются по-разному:
+#   secrets.sops.yml      — целиком: Reality-ключи, UUID клиентов, пароли;
+#   first-entry.sops.yml  — только password, чтобы имя ноды, user, port и
+#                           method читались гейтом без ключа.
+#
+# Приватная часть ключа в репозиторий не коммитится никогда. Заполнить своим
+# получателем: wizard/private_tree.py (шаг 2) либо руками.
+creation_rules:
+  - path_regex: inventories/group_vars/all/secrets\.sops\.yml$
+    age: age1REPLACE_WITH_YOUR_OWN_RECIPIENT
+
+  - path_regex: inventories/first-entry\.sops\.yml$
+    age: age1REPLACE_WITH_YOUR_OWN_RECIPIENT
+    encrypted_regex: '^(password)$'

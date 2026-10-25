@@ -1,0 +1,797 @@
+---
+- name: Render and validate sing-box server config with fake credentials
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  # Переменные перечислены явно, а не подтянуты из defaults роли. Так было и
+  # раньше; две попытки «улучшить» это провалились, и обе стоит помнить:
+  # vars_files перекрывают play vars (тест уехал на боевой /etc/sing-box), а
+  # set_fact перекрывает и task vars (задача с TLS молча рендерилась как
+  # reality и падала на отсутствующем публичном ключе).
+  #
+  # Цена простоты: добавил переменную в шаблон — добавь и сюда.
+  vars:
+    singbox_test_bin: "{{ lookup('env', 'SINGBOX_TEST_BIN') | default('sing-box', true) }}"
+    singbox_legacy_test_bin: >-
+      {{ lookup('env', 'SINGBOX_LEGACY_TEST_BIN') |
+         default('sing-box-1.11', true) }}
+    xray_test_bin: "{{ lookup('env', 'XRAY_TEST_BIN') | default('xray', true) }}"
+    singbox_log_level: warn
+    singbox_vless_security: reality
+    singbox_sni_routing_enabled: false
+    xray_sni_routing_enabled: false
+    singbox_reality_server: singbox
+    singbox_reality_fingerprints:
+      xray: chrome
+      singbox: randomized
+    singbox_config_dir: /tmp/vpn-fleet-ci-sing-box
+    singbox_reality_port: 443
+    xray_listen: 127.0.0.1
+    xray_listen_port: 1443
+    reality_frontend_bind_port: "{{ singbox_reality_port }}"
+    reality_frontend_backend_host: "{{ xray_listen }}"
+    reality_frontend_backend_port: "{{ xray_listen_port }}"
+    reality_frontend_inspect_delay: "5s"
+    singbox_reality_dest: www.microsoft.com
+    singbox_reality_sni: www.microsoft.com
+    singbox_hy2_enabled: false
+    # Bypass lists must be non-empty here: they render the extra DNS server and
+    # route rules, which can trigger a startup crash.
+    singbox_client_direct_domains:
+      - example.com
+    singbox_client_direct_processes:
+      - qbittorrent
+    singbox_client_direct_dns: 1.1.1.1
+    node_reality_short_id: 0123456789abcdef
+    node_clients:
+      - name: ci-client
+        uuid: 00000000-0000-4000-8000-000000000001
+    _ci_startable_cases:
+      - config
+      - config-xray-mode
+      - client-xray
+      - client-singbox
+      - probe-xray
+      - probe-singbox
+  tasks:
+    - name: Generate throwaway Reality keypair
+      ansible.builtin.command:
+        argv:
+          - "{{ singbox_test_bin }}"
+          - generate
+          - reality-keypair
+      register: _ci_reality_keypair
+      changed_when: false
+      no_log: true
+
+    - name: Extract throwaway private key
+      ansible.builtin.set_fact:
+        node_reality_private_key: >-
+          {{ (_ci_reality_keypair.stdout |
+              regex_search('(?m)^PrivateKey: ([^ ]+)$', '\1')) | first }}
+        node_reality_public_key: >-
+          {{ (_ci_reality_keypair.stdout |
+              regex_search('(?m)^PublicKey: ([^ ]+)$', '\1')) | first }}
+      no_log: true
+
+    - name: Require Xray test binary
+      ansible.builtin.command:
+        argv:
+          - "{{ xray_test_bin }}"
+          - version
+      register: _ci_xray_version
+      changed_when: false
+
+    - name: Create temporary config directory
+      ansible.builtin.file:
+        path: "{{ singbox_config_dir }}"
+        state: directory
+        mode: "0700"
+
+    - name: Generate throwaway TLS certificate
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - rsa:2048
+          - -nodes
+          - -days
+          - "1"
+          - -subj
+          - /CN=vpn-test.invalid
+          - -keyout
+          - "{{ singbox_config_dir }}/vless.key"
+          - -out
+          - "{{ singbox_config_dir }}/vless.crt"
+        creates: "{{ singbox_config_dir }}/vless.crt"
+      no_log: true
+
+    - name: Generate intended and foreign Hysteria2 certificates
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -newkey
+          - ec
+          - -pkeyopt
+          - ec_paramgen_curve:prime256v1
+          - -nodes
+          - -days
+          - "1"
+          - -subj
+          - /CN=vpn-test.invalid
+          - -keyout
+          - "{{ singbox_config_dir }}/hy2-{{ item }}.key"
+          - -out
+          - "{{ singbox_config_dir }}/hy2-{{ item }}.crt"
+      loop:
+        - intended
+        - foreign
+      no_log: true
+
+    - name: Extract intended Hysteria2 certificate public key
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - "{{ singbox_config_dir }}/hy2-intended.crt"
+          - -pubkey
+          - -noout
+          - -out
+          - "{{ singbox_config_dir }}/hy2-intended.pub"
+      changed_when: false
+      no_log: true
+
+    - name: Encode intended Hysteria2 public key as DER
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - pkey
+          - -pubin
+          - -in
+          - "{{ singbox_config_dir }}/hy2-intended.pub"
+          - -outform
+          - DER
+          - -out
+          - "{{ singbox_config_dir }}/hy2-intended.der"
+      changed_when: false
+      no_log: true
+
+    - name: Hash intended Hysteria2 public key
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - dgst
+          - -sha256
+          - -binary
+          - -out
+          - "{{ singbox_config_dir }}/hy2-intended.sha256"
+          - "{{ singbox_config_dir }}/hy2-intended.der"
+      changed_when: false
+      no_log: true
+
+    - name: Read intended Hysteria2 certificate and public key pin
+      ansible.builtin.slurp:
+        src: "{{ singbox_config_dir }}/{{ item }}"
+      loop:
+        - hy2-intended.crt
+        - hy2-intended.sha256
+      register: _ci_hy2_identity
+      no_log: true
+
+    - name: Set synthetic Hysteria2 trust material
+      ansible.builtin.set_fact:
+        node_hy2_password: separate-hy2-test-password
+        node_hy2_certificate: >-
+          {{ _ci_hy2_identity.results[0].content | b64decode }}
+        node_hy2_certificate_public_key_sha256: >-
+          {{ _ci_hy2_identity.results[1].content }}
+      no_log: true
+
+    - name: Prepare foreign Hysteria2 server directory
+      ansible.builtin.file:
+        path: "{{ singbox_config_dir }}/foreign"
+        state: directory
+        mode: "0700"
+
+    - name: Install foreign Hysteria2 identity for the negative test
+      ansible.builtin.copy:
+        src: "{{ singbox_config_dir }}/hy2-{{ item.src }}"
+        dest: "{{ singbox_config_dir }}/foreign/hy2.{{ item.dest }}"
+        mode: "0600"
+        remote_src: true
+      loop:
+        - src: foreign.crt
+          dest: crt
+        - src: foreign.key
+          dest: key
+      no_log: true
+
+    - name: Render foreign Hysteria2 server
+      ansible.builtin.template:
+        src: ../roles/singbox/templates/config.json.j2
+        dest: /tmp/vpn-fleet-ci-sing-box/foreign/server.json
+        mode: "0600"
+        validate: "{{ singbox_test_bin }} check -c %s"
+      vars:
+        singbox_config_dir: /tmp/vpn-fleet-ci-sing-box/foreign
+        singbox_reality_server: xray
+        singbox_hy2_enabled: true
+        singbox_hy2_port: 28443
+        singbox_hy2_sni: vpn-test.invalid
+        singbox_hy2_up_mbps: 10
+        singbox_hy2_down_mbps: 10
+      no_log: true
+
+    - name: Render Hysteria2 client pinned to the intended certificate
+      ansible.builtin.template:
+        src: ../roles/singbox/templates/probe.json.j2
+        dest: "{{ singbox_config_dir }}/foreign/client.json"
+        mode: "0600"
+        validate: "{{ singbox_test_bin }} check -c %s"
+      vars:
+        ansible_host: 127.0.0.1
+        export_client:
+          name: ci-client
+          uuid: 00000000-0000-4000-8000-000000000001
+        probe_transport: hy2
+        singbox_hy2_port: 28443
+        singbox_hy2_sni: vpn-test.invalid
+      no_log: true
+
+    - name: Reject Hysteria2 server with a foreign certificate
+      ansible.builtin.command:
+        argv:
+          - "{{ playbook_dir }}/hy2-reject-foreign-certificate.sh"
+          - "{{ singbox_test_bin }}"
+          - "{{ singbox_config_dir }}/foreign/server.json"
+          - "{{ singbox_config_dir }}/foreign/client.json"
+          - "{{ singbox_config_dir }}/foreign"
+      changed_when: false
+
+    - name: Render legacy Hysteria2 client with the intended certificate
+      ansible.builtin.template:
+        src: ../roles/singbox/templates/client-legacy.json.j2
+        dest: "{{ singbox_config_dir }}/client-legacy-hy2.json"
+        mode: "0600"
+        validate: "{{ singbox_legacy_test_bin }} check -c %s"
+      vars:
+        ansible_host: 192.0.2.1
+        export_client:
+          name: legacy-client
+          uuid: 00000000-0000-4000-8000-000000000001
+        node_bypass_cidr: 192.0.2.1/32
+        singbox_hy2_enabled: true
+        singbox_hy2_port: 443
+        singbox_hy2_sni: vpn-test.invalid
+      no_log: true
+
+    - name: Read rendered legacy Hysteria2 client
+      ansible.builtin.slurp:
+        src: "{{ singbox_config_dir }}/client-legacy-hy2.json"
+      register: _ci_legacy_hy2
+      no_log: true
+
+    - name: Assert legacy Hysteria2 certificate and credential separation
+      vars:
+        _ci_legacy_hy2_json: >-
+          {{ _ci_legacy_hy2.content | b64decode | from_json }}
+        _ci_legacy_hy2_outbound: >-
+          {{ _ci_legacy_hy2_json.outbounds |
+             selectattr('type', 'equalto', 'hysteria2') | first }}
+      ansible.builtin.assert:
+        that:
+          - _ci_legacy_hy2_outbound.password == node_hy2_password
+          - _ci_legacy_hy2_outbound.password != '00000000-0000-4000-8000-000000000001'
+          - _ci_legacy_hy2_outbound.tls.insecure is not defined
+          - _ci_legacy_hy2_outbound.tls.certificate == node_hy2_certificate
+        fail_msg: Legacy Hysteria2 client lacks independent credentials or trust.
+        quiet: true
+      no_log: true
+
+    - name: Render and validate sing-box Reality server config
+      ansible.builtin.template:
+        src: ../roles/singbox/templates/config.json.j2
+        dest: "{{ singbox_config_dir }}/config.json"
+        mode: "0600"
+        validate: "{{ singbox_test_bin }} check -c %s"
+      vars:
+        singbox_reality_server: singbox
+      no_log: true
+
+    - name: Validate rendered server config
+      ansible.builtin.command:
+        argv:
+          - "{{ singbox_test_bin }}"
+          - check
+          - -c
+          - "{{ singbox_config_dir }}/config.json"
+      changed_when: false
+      no_log: true
+
+    - name: Render sing-box server side for Xray mode
+      ansible.builtin.template:
+        src: ../roles/singbox/templates/config.json.j2
+        dest: "{{ singbox_config_dir }}/config-xray-mode.json"
+        mode: "0600"
+        validate: "{{ singbox_test_bin }} check -c %s"
+      vars:
+        singbox_reality_server: xray
+      no_log: true
+
+    - name: Render and validate Xray Reality server config
+      ansible.builtin.template:
+        src: ../roles/singbox/templates/xray-config.json.j2
+        dest: "{{ singbox_config_dir }}/xray-config.json"
+        mode: "0600"
+        validate: "{{ xray_test_bin }} run -test -config %s"
+      no_log: true
+
+    - name: Render and validate HAProxy Reality frontend
+      ansible.builtin.template:
+        src: ../roles/reality_frontend/templates/haproxy.cfg.j2
+        dest: "{{ singbox_config_dir }}/haproxy.cfg"
+        mode: "0600"
+        validate: haproxy -c -f %s
+
+    - name: Render and validate Xray Reality server config with SNI routing
+      ansible.builtin.template:
+        src: ../roles/singbox/templates/xray-config.json.j2
+        dest: "{{ singbox_config_dir }}/xray-config-sni.json"
+        mode: "0600"
+        validate: "{{ xray_test_bin }} run -test -config %s"
+      vars:
+        xray_sni_routing_enabled: true
+        xray_sni_domains: [gitlab.example.invalid]
+        xray_sni_tunnel_target: "127.0.0.1:8443"
+      no_log: true
+
+    - name: Validate rendered Xray Reality server config
+      ansible.builtin.command:
+        argv:
+          - "{{ xray_test_bin }}"
+          - run
+          - -test
+          - -config
+          - "{{ singbox_config_dir }}/xray-config.json"
+      changed_when: false
+      no_log: true
+
+    - name: Render clients and probe for both Reality server modes
+      ansible.builtin.template:
+        src: "../roles/singbox/templates/{{ reality_case.template }}"
+        dest: "{{ singbox_config_dir }}/{{ reality_case.name }}.json"
+        mode: "0600"
+        validate: "{{ singbox_test_bin }} check -c %s"
+      loop:
+        - name: client-xray
+          template: client-modern.json.j2
+          server: xray
+        - name: client-singbox
+          template: client-modern.json.j2
+          server: singbox
+        - name: probe-xray
+          template: probe.json.j2
+          server: xray
+        - name: probe-singbox
+          template: probe.json.j2
+          server: singbox
+      loop_control:
+        loop_var: reality_case
+        label: "{{ reality_case.name }}"
+      vars:
+        ansible_host: 192.0.2.1
+        export_client:
+          name: laptop
+          uuid: 00000000-0000-4000-8000-000000000001
+        node_bypass_cidr: 192.0.2.1/32
+        singbox_client_bind_interfaces: {}
+        singbox_reality_server: "{{ reality_case.server }}"
+        probe_transport: vless
+      no_log: true
+
+    - name: Read Reality render cases
+      ansible.builtin.slurp:
+        src: "{{ singbox_config_dir }}/{{ item }}.json"
+      loop:
+        - config
+        - config-xray-mode
+        - xray-config
+        - client-xray
+        - client-singbox
+        - probe-xray
+        - probe-singbox
+      register: _ci_reality_renders
+
+    - name: Assert Reality ownership and fingerprints
+      ansible.builtin.assert:
+        that:
+          - (_ci_reality_renders.results[0].content | b64decode | from_json).inbounds | length == 1
+          - (_ci_reality_renders.results[0].content | b64decode | from_json).inbounds[0].type == 'vless'
+          - (_ci_reality_renders.results[1].content | b64decode | from_json).inbounds | length == 0
+          - (_ci_reality_renders.results[2].content | b64decode | from_json).inbounds[0].protocol == 'vless'
+          - (_ci_reality_renders.results[3].content | b64decode | from_json).outbounds[2].tls.utls.fingerprint == 'chrome'
+          - (_ci_reality_renders.results[4].content | b64decode | from_json).outbounds[2].tls.utls.fingerprint == 'randomized'
+          - (_ci_reality_renders.results[5].content | b64decode | from_json).outbounds[0].tls.utls.fingerprint == 'chrome'
+          - (_ci_reality_renders.results[6].content | b64decode | from_json).outbounds[0].tls.utls.fingerprint == 'randomized'
+        fail_msg: Reality server ownership or client fingerprint is incorrect.
+
+    - name: Render iPhone legacy client with Xray-owned Reality
+      ansible.builtin.template:
+        src: ../roles/singbox/templates/client-legacy.json.j2
+        dest: "{{ singbox_config_dir }}/client-iphone-legacy.json"
+        mode: "0600"
+        validate: "{{ singbox_legacy_test_bin }} check -c %s"
+      vars:
+        ansible_host: 192.0.2.1
+        export_client:
+          name: iphone
+          uuid: 00000000-0000-4000-8000-000000000001
+        node_bypass_cidr: 192.0.2.1/32
+        singbox_reality_server: xray
+      no_log: true
+
+    - name: Read rendered iPhone legacy client
+      ansible.builtin.slurp:
+        src: "{{ singbox_config_dir }}/client-iphone-legacy.json"
+      register: _ci_iphone_legacy
+
+    - name: Render iPhone legacy client with sing-box-owned Reality
+      ansible.builtin.template:
+        src: ../roles/singbox/templates/client-legacy.json.j2
+        dest: "{{ singbox_config_dir }}/client-iphone-legacy-singbox.json"
+        mode: "0600"
+        validate: "{{ singbox_legacy_test_bin }} check -c %s"
+      vars:
+        ansible_host: 192.0.2.1
+        export_client:
+          name: iphone
+          uuid: 00000000-0000-4000-8000-000000000001
+        node_bypass_cidr: 192.0.2.1/32
+        singbox_reality_server: singbox
+      no_log: true
+
+    - name: Read sing-box-owned iPhone legacy client
+      ansible.builtin.slurp:
+        src: "{{ singbox_config_dir }}/client-iphone-legacy-singbox.json"
+      register: _ci_iphone_legacy_singbox
+
+    - name: Render iPhone VLESS URL with Xray-owned Reality
+      ansible.builtin.template:
+        src: ../roles/singbox/templates/client-vless.url.j2
+        dest: "{{ singbox_config_dir }}/client-iphone.url"
+        mode: "0600"
+      vars:
+        ansible_host: 192.0.2.1
+        export_client:
+          name: iphone
+          uuid: 00000000-0000-4000-8000-000000000001
+        node_name: ci
+        singbox_reality_server: xray
+        singbox_legacy_client_names:
+          - iphone
+      no_log: true
+
+    - name: Read rendered iPhone VLESS URL
+      ansible.builtin.slurp:
+        src: "{{ singbox_config_dir }}/client-iphone.url"
+      register: _ci_iphone_url
+
+    - name: Assert iPhone stays on the 1.11 schema and known-good handshake
+      vars:
+        _ci_iphone: "{{ _ci_iphone_legacy.content | b64decode | from_json }}"
+        _ci_iphone_singbox: >-
+          {{ _ci_iphone_legacy_singbox.content | b64decode | from_json }}
+        _ci_laptop: >-
+          {{ _ci_reality_renders.results[3].content | b64decode | from_json }}
+        _ci_iphone_vless: >-
+          {{ _ci_iphone.outbounds |
+             selectattr('type', 'equalto', 'vless') | first }}
+        _ci_laptop_vless: >-
+          {{ _ci_laptop.outbounds |
+             selectattr('type', 'equalto', 'vless') | first }}
+      ansible.builtin.assert:
+        that:
+          - >-
+            _ci_iphone.dns.servers |
+            selectattr('address', 'defined') | list | length ==
+            _ci_iphone.dns.servers | length
+          - >-
+            _ci_iphone.dns.servers |
+            selectattr('type', 'defined') | list | length == 0
+          - "'default_domain_resolver' not in _ci_iphone.route"
+          - _ci_iphone_vless.flow == 'xtls-rprx-vision'
+          - _ci_iphone_vless.tls.utls.fingerprint == 'chrome'
+          - >-
+            (_ci_iphone_singbox.outbounds |
+             selectattr('type', 'equalto', 'vless') |
+             first).tls.utls.fingerprint == 'randomized'
+          - "'&flow=xtls-rprx-vision&' in (_ci_iphone_url.content | b64decode)"
+          - "'&fp=chrome&' in (_ci_iphone_url.content | b64decode)"
+          - _ci_iphone_vless.server == _ci_laptop_vless.server
+          - _ci_iphone_vless.server_port == _ci_laptop_vless.server_port
+          - _ci_iphone_vless.uuid == _ci_laptop_vless.uuid
+          - _ci_iphone_vless.tls.reality.public_key == _ci_laptop_vless.tls.reality.public_key
+          - _ci_iphone_vless.tls.reality.short_id == _ci_laptop_vless.tls.reality.short_id
+        fail_msg: >-
+          iPhone legacy config must keep the 1.11 DNS/route schema, Vision
+          flow, randomized uTLS, and the laptop's endpoint and credentials.
+
+    # `sing-box check` only validates the schema: it happily accepts configs
+    # whose service start fails (for example, a DNS server with
+    # "detour": "direct" passed check and crash-looped the laptop off the net).
+    # So actually start every rendered config. Inbounds are stripped: TUN needs
+    # privileges and the Hysteria2 listener needs cert files absent in CI —
+    # the DNS/outbound/route wiring we are guarding is started all the same.
+    - name: Build startable probes without inbounds
+      ansible.builtin.copy:
+        content: >-
+          {{ (lookup('file', singbox_config_dir ~ '/' ~ item ~ '.json') | from_json)
+             | dict2items | rejectattr('key', 'in', ['inbounds', 'experimental'])
+             | items2dict | to_nice_json }}
+        dest: "{{ singbox_config_dir }}/startable-{{ item }}.json"
+        mode: "0600"
+      loop: "{{ _ci_startable_cases }}"
+      no_log: true
+
+    - name: Smoke-run every rendered config
+      ansible.builtin.command:
+        argv:
+          - timeout
+          - "6"
+          - "{{ singbox_test_bin }}"
+          - run
+          - -c
+          - "{{ singbox_config_dir }}/startable-{{ item }}.json"
+          - -D
+          - "{{ singbox_config_dir }}"
+      loop: "{{ _ci_startable_cases }}"
+      register: _ci_smoke_runs
+      # 124 = killed by timeout, i.e. the service was still running. Anything
+      # else means sing-box exited on its own — a startup failure.
+      failed_when: _ci_smoke_runs.rc != 124
+      changed_when: false
+
+    - name: Render hardened server units
+      ansible.builtin.template:
+        src: "../roles/singbox/templates/{{ item.template }}"
+        dest: "{{ singbox_config_dir }}/{{ item.name }}.service"
+        mode: "0644"
+      loop:
+        - name: sing-box-ci
+          template: singbox.service.j2
+        - name: xray-ci
+          template: xray.service.j2
+      vars:
+        ansible_managed: CI
+        singbox_user: root
+        singbox_group: root
+        singbox_bin: /bin/true
+        singbox_service: sing-box-ci
+        xray_user: root
+        xray_group: root
+        xray_bin: /bin/true
+        xray_config_dir: "{{ singbox_config_dir }}"
+        xray_service: xray-ci
+
+    - name: Verify hardened server units
+      ansible.builtin.command:
+        argv:
+          - systemd-analyze
+          - verify
+          - "{{ singbox_config_dir }}/{{ item }}.service"
+      loop:
+        - sing-box-ci
+        - xray-ci
+      changed_when: false
+
+    - name: Render TLS server config with fake credentials
+      ansible.builtin.template:
+        src: ../roles/singbox/templates/config.json.j2
+        dest: "{{ singbox_config_dir }}/config-tls.json"
+        mode: "0600"
+        validate: "{{ singbox_test_bin }} check -c %s"
+      vars:
+        singbox_vless_security: tls
+        singbox_vless_tls_server_name: vpn-test.invalid
+        singbox_vless_tls_certificate_path: "{{ singbox_config_dir }}/vless.crt"
+        singbox_vless_tls_key_path: "{{ singbox_config_dir }}/vless.key"
+      no_log: true
+
+    - name: Render modern TLS client config with fake credentials
+      ansible.builtin.template:
+        src: ../roles/singbox/templates/client-modern.json.j2
+        dest: "{{ singbox_config_dir }}/client-modern-tls.json"
+        mode: "0600"
+        validate: "{{ singbox_test_bin }} check -c %s"
+      vars:
+        ansible_host: 192.0.2.1
+        export_client:
+          name: laptop
+          uuid: 00000000-0000-4000-8000-000000000001
+        node_bypass_cidr: 192.0.2.1/32
+        singbox_client_bind_interfaces:
+          laptop: wlp99s0
+        singbox_vless_security: tls
+        singbox_vless_tls_server_name: vpn-test.invalid
+      no_log: true
+
+    - name: Read rendered modern TLS client config
+      ansible.builtin.slurp:
+        src: "{{ singbox_config_dir }}/client-modern-tls.json"
+      register: _ci_modern_client
+
+    - name: Assert modern DNS does not depend on the host resolver
+      ansible.builtin.assert:
+        that:
+          # direct-dns is a fixed public resolver for the bypass lists, not the
+          # host's — nothing here may fall back to system DNS.
+          - >-
+            ((_ci_modern_client.content | b64decode | from_json).dns.servers |
+             map(attribute='tag') | list) in [['proxy-dns'],
+                                              ['proxy-dns', 'direct-dns']]
+          - >-
+            ((_ci_modern_client.content | b64decode | from_json).dns.servers |
+             map(attribute='type') | list) is not contains('local')
+          - >-
+            (_ci_modern_client.content | b64decode |
+             from_json).route.default_domain_resolver.server == 'proxy-dns'
+          - >-
+            ((_ci_modern_client.content | b64decode | from_json).outbounds |
+             selectattr('type', 'equalto', 'urltest') | first).url is
+            match('^https://[0-9.]+/')
+          - >-
+            ((_ci_modern_client.content | b64decode | from_json).outbounds |
+             selectattr('type', 'equalto', 'vless') |
+             first).bind_interface == 'wlp99s0'
+        fail_msg: >-
+          Modern DNS must not depend on the host resolver, and urltest must not
+          require DNS during bootstrap.
+
+    - name: Render modern client with per-UID tunnelling
+      ansible.builtin.template:
+        src: ../roles/singbox/templates/client-modern.json.j2
+        dest: "{{ singbox_config_dir }}/client-modern-uid.json"
+        mode: "0600"
+        validate: "{{ singbox_test_bin }} check -c %s"
+      vars:
+        ansible_host: 192.0.2.1
+        export_client:
+          name: laptop
+          uuid: 00000000-0000-4000-8000-000000000001
+        node_bypass_cidr: 192.0.2.1/32
+        singbox_vless_security: tls
+        singbox_vless_tls_server_name: vpn-test.invalid
+        singbox_tun_include_uid: [1000]
+      no_log: true
+
+    - name: Read rendered per-UID client config
+      ansible.builtin.slurp:
+        src: "{{ singbox_config_dir }}/client-modern-uid.json"
+      register: _ci_modern_uid
+
+    - name: Assert per-UID tunnelling implies auto_redirect
+      ansible.builtin.assert:
+        that:
+          - >-
+            ((_ci_modern_uid.content | b64decode | from_json).inbounds |
+             selectattr('type', 'equalto', 'tun') | first).include_uid == [1000]
+          - >-
+            ((_ci_modern_uid.content | b64decode | from_json).inbounds |
+             selectattr('type', 'equalto', 'tun') | first).auto_redirect
+          - >-
+            'include_uid' not in ((_ci_modern_client.content | b64decode |
+             from_json).inbounds | selectattr('type', 'equalto', 'tun') | first)
+        fail_msg: >-
+          include_uid without auto_redirect tunnels UDP only: TCP goes to tun
+          but is never intercepted. An empty include_uid must leave the config
+          byte-identical to before.
+
+    # sing-box генерит ключ сам — `wg` в CI-образе нет, и ставить
+    # wireguard-tools ради одной строки незачем. Формат вывода тот же, что у
+    # reality-keypair выше.
+    - name: Generate throwaway WireGuard endpoint key
+      ansible.builtin.command:
+        argv:
+          - "{{ singbox_test_bin }}"
+          - generate
+          - wg-keypair
+      register: _ci_mesh_wg_keypair
+      changed_when: false
+      no_log: true
+
+    - name: Extract throwaway WireGuard private key
+      ansible.builtin.set_fact:
+        _ci_mesh_wg_private_key: >-
+          {{ (_ci_mesh_wg_keypair.stdout |
+              regex_search('(?m)^PrivateKey: ([^ ]+)$', '\1')) | first }}
+      no_log: true
+
+    - name: Render client with infrastructure mesh over Hy2
+      ansible.builtin.template:
+        src: ../roles/singbox/templates/client-modern.json.j2
+        dest: "{{ singbox_config_dir }}/client-modern-mesh.json"
+        mode: "0600"
+        validate: "{{ singbox_test_bin }} check -c %s"
+      vars:
+        ansible_host: 192.0.2.1
+        export_client:
+          name: mesh-host
+          uuid: 00000000-0000-4000-8000-000000000001
+          wireguard_private_key: "{{ _ci_mesh_wg_private_key }}"
+        node_bypass_cidr: 192.0.2.1/32
+        singbox_vless_security: tls
+        singbox_vless_tls_server_name: vpn-test.invalid
+        singbox_hy2_enabled: true
+        singbox_hy2_port: 443
+        singbox_hy2_sni: vpn-test.invalid
+        singbox_export_mesh_only: true
+        singbox_client_overrides:
+          mesh-host:
+            wireguard_endpoint:
+              tag: infra-mesh
+              system: true
+              name: sb-mesh
+              address: 198.51.100.40/24
+              route_cidr: 198.51.100.0/24
+              detour: hy2
+              mtu: 1280
+              peers:
+                - endpoint_address: 192.0.2.10
+                  endpoint_port: 51820
+                  public_key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+                  allowed_ip: 198.51.100.1/32
+              lan_endpoint:
+                tag: infra-mesh-lan
+                name: sb-mesh-lan
+                address: 198.51.100.41/32
+                listen_port: 40000
+                peers:
+                  - endpoint_address: 192.0.2.100
+                    endpoint_port: 51820
+                    public_key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+                    allowed_ip: 198.51.100.100/32
+      no_log: true
+
+    - name: Read rendered infrastructure mesh client
+      ansible.builtin.slurp:
+        src: "{{ singbox_config_dir }}/client-modern-mesh.json"
+      register: _ci_mesh_client
+
+    - name: Assert infrastructure mesh is pinned to Hy2
+      vars:
+        _ci_mesh_json: "{{ _ci_mesh_client.content | b64decode | from_json }}"
+        _ci_mesh_endpoint: >-
+          {{ (_ci_mesh_json.endpoints |
+              selectattr('tag', 'equalto', 'infra-mesh') | first) }}
+        _ci_mesh_hy2: >-
+          {{ (_ci_mesh_json.outbounds |
+              selectattr('type', 'equalto', 'hysteria2') | first) }}
+      ansible.builtin.assert:
+        that:
+          - _ci_mesh_endpoint.detour == 'hy2'
+          - _ci_mesh_endpoint.system
+          - _ci_mesh_endpoint.name == 'sb-mesh'
+          - _ci_mesh_json.inbounds == []
+          - _ci_mesh_endpoint.mtu == 1280
+          - _ci_mesh_endpoint.address == ['198.51.100.40/24']
+          - >-
+            (_ci_mesh_json.endpoints |
+             selectattr('tag', 'equalto', 'infra-mesh-lan') |
+             first).listen_port == 40000
+          - >-
+            (_ci_mesh_json.route.rules |
+             selectattr('outbound', 'defined') |
+             selectattr('outbound', 'equalto', 'infra-mesh') |
+             first).ip_cidr == ['198.51.100.0/24']
+          - _ci_mesh_hy2.password == node_hy2_password
+          - _ci_mesh_hy2.password != '00000000-0000-4000-8000-000000000001'
+          - _ci_mesh_hy2.tls.insecure is not defined
+          - >-
+            _ci_mesh_hy2.tls.certificate_public_key_sha256 ==
+            [node_hy2_certificate_public_key_sha256]
+        fail_msg: Infrastructure mesh endpoint must use Hy2 and an explicit MTU.

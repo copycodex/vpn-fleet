@@ -1,0 +1,85 @@
+---
+- name: Check Xray version declaration
+  ansible.builtin.assert:
+    that:
+      - >-
+        singbox_vless_security != 'reality' or
+        singbox_reality_server != 'xray' or
+        (hostvars[inventory_hostname].get('xray_version', '') |
+         string | length > 0)
+    fail_msg: "xray_version must be declared in node inventory"
+    quiet: true
+
+- name: Check loopback Xray has a frontend
+  ansible.builtin.assert:
+    that:
+      - >-
+        singbox_vless_security != 'reality' or
+        singbox_reality_server != 'xray' or
+        xray_listen not in ['127.0.0.1', '::1', 'localhost'] or
+        reality_frontend_enabled | default(false) | bool
+    fail_msg: "loopback Xray requires reality_frontend_enabled"
+    quiet: true
+
+- name: Check frontend uses loopback Xray
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (reality_frontend_enabled | default(false) | bool) or
+        (singbox_vless_security == 'reality' and
+         singbox_reality_server == 'xray' and
+         xray_listen in ['127.0.0.1', '::1', 'localhost'])
+    fail_msg: "reality_frontend_enabled requires loopback Xray"
+    quiet: true
+
+- name: Check frontend and backend use distinct ports
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (reality_frontend_enabled | default(false) | bool) or
+        (xray_listen_port | int != singbox_reality_port | int)
+    fail_msg: "xray_listen_port must differ from singbox_reality_port"
+    quiet: true
+
+- name: Check frontend bind and backend mapping
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (reality_frontend_enabled | default(false) | bool) or
+        (reality_frontend_bind_port | default(singbox_reality_port) | int ==
+         singbox_reality_port | int and
+         reality_frontend_backend_host | default(xray_listen) == xray_listen and
+         reality_frontend_backend_port | default(xray_listen_port) | int ==
+         xray_listen_port | int)
+    fail_msg: "reality_frontend_bind_port or reality_frontend_backend_port does not match Xray"
+    quiet: true
+
+- name: Check frontend port is allowed by firewall
+  ansible.builtin.assert:
+    that:
+      - >-
+        not (reality_frontend_enabled | default(false) | bool) or
+        (firewall_allowed_tcp_ports | default([]) |
+         selectattr('port', 'equalto', singbox_reality_port) | list | length > 0)
+    fail_msg: "firewall_allowed_tcp_ports must include singbox_reality_port"
+    quiet: true
+
+- name: Check Xray checksum for selected version and architecture
+  ansible.builtin.assert:
+    that:
+      - >-
+        singbox_vless_security != 'reality' or
+        singbox_reality_server != 'xray' or
+        (xray_version in xray_checksums and
+         singbox_arch in xray_checksums.get(xray_version, {}) and
+         xray_checksums.get(xray_version, {}).get(singbox_arch, '') is
+         match('^sha256:[0-9a-f]{64}$'))
+    fail_msg: "xray_checksums has no checksum for selected Xray release and architecture"
+    quiet: true
+
+- name: Map per-node secrets for the Reality pair check
+  ansible.builtin.include_tasks: secrets_map.yml
+  when: singbox_vless_security == 'reality'
+
+- name: Check the Reality key pair before node changes
+  ansible.builtin.import_tasks: reality_keypair.yml

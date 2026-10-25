@@ -1,0 +1,33 @@
+---
+# SSH hardening: full sshd_config rewrite based on Mozilla guidelines.
+# This role is meant to be applied AFTER bootstrap (devops user exists,
+# port already non-22, root login already off).
+
+- name: Render hardened sshd_config
+  ansible.builtin.template:
+    src: sshd_config.j2
+    dest: /etc/ssh/sshd_config
+    owner: root
+    group: root
+    mode: "0644"
+    validate: "/usr/sbin/sshd -t -f %s"
+    backup: true
+  notify: Restart sshd
+
+- name: Render SSH banner (if enabled)
+  ansible.builtin.template:
+    src: banner.txt.j2
+    dest: /etc/ssh/banner.txt
+    owner: root
+    group: root
+    mode: "0644"
+  when: ssh_banner_enabled
+
+- name: Remove SSH banner (if disabled)
+  ansible.builtin.file:
+    path: /etc/ssh/banner.txt
+    state: absent
+  when: not ssh_banner_enabled
+
+- name: Force handlers (apply sshd restart)
+  ansible.builtin.meta: flush_handlers

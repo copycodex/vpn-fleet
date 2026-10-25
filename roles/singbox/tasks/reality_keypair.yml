@@ -1,0 +1,26 @@
+---
+- name: Require both Reality key halves
+  ansible.builtin.assert:
+    that:
+      - node_reality_private_key | length > 0
+      - node_reality_public_key | length > 0
+    fail_msg: Reality key pair is incomplete.
+    quiet: true
+  when: singbox_vless_security == 'reality'
+  no_log: true
+
+- name: Verify the Reality private key matches the exported public key
+  ansible.builtin.command:
+    argv:
+      - python3
+      - "{{ playbook_dir }}/../scripts/check-reality-keypair.py"
+    stdin: >-
+      {{ {'private_key': node_reality_private_key,
+          'public_key': node_reality_public_key} | to_json }}
+    stdin_add_newline: false
+  delegate_to: localhost
+  become: false
+  check_mode: false
+  changed_when: false
+  when: singbox_vless_security == 'reality'
+  no_log: true

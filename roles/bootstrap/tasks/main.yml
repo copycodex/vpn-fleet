@@ -1,0 +1,120 @@
+---
+# Bootstrap a freshly-provisioned Ubuntu host:
+# - Update apt cache, install base packages
+# - Create managed user with sudo + SSH key
+# - Switch SSH port from 22 to bootstrap_ssh_port
+# - Disable root login and password auth
+#
+# Tasks use idempotent modules, but playbooks/bootstrap.yml is intentionally
+# one-shot: after success it disables root login and moves SSH away from port 22.
+
+# Safety: never bootstrap a host with zero keys — we disable root + password
+# auth below, so an empty key set locks us out (this happened on the first
+# password-bootstrapped node).
+- name: Assert authorized keys are defined (else we lock ourselves out)
+  ansible.builtin.assert:
+    that:
+      - ssh_authorized_keys_devops is defined
+      - ssh_authorized_keys_devops | length > 0
+    fail_msg: >-
+      ssh_authorized_keys_devops is empty/undefined — bootstrap would create
+      '{{ bootstrap_user }}' with no SSH key and then disable password+root login.
+    quiet: true
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  changed_when: false
+
+- name: Install base packages
+  ansible.builtin.apt:
+    name: "{{ bootstrap_base_packages }}"
+    state: present
+
+- name: Create managed user
+  ansible.builtin.user:
+    name: "{{ bootstrap_user }}"
+    groups: "{{ bootstrap_user_groups }}"
+    shell: /bin/bash
+    create_home: true
+    state: present
+
+# Declarative: install exactly the keys from group_vars ssh_keys.yml — NOT a copy
+# of root's authorized_keys. Provider-agnostic: works on password-bootstrapped
+# nodes and TF/cloud-init nodes alike. Single call + exclusive=true
+# sets the file to exactly this set (a per-key loop with exclusive would keep only
+# the last key).
+- name: Install authorized keys for managed user (from ssh_keys.yml)
+  ansible.posix.authorized_key:
+    user: "{{ bootstrap_user }}"
+    state: present
+    key: '{{ ssh_authorized_keys_devops | map(attribute="pubkey") | join("\n") }}'
+    exclusive: true
+
+- name: Configure passwordless sudo for managed user
+  ansible.builtin.copy:
+    dest: "/etc/sudoers.d/90-{{ bootstrap_user }}"
+    content: "{{ bootstrap_user }} ALL=(ALL) NOPASSWD:ALL\n"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+
+- name: Disable ssh.socket (Ubuntu 24 uses socket activation by default)
+  ansible.builtin.systemd:
+    name: ssh.socket
+    enabled: false
+    masked: false
+    state: stopped
+    daemon_reload: true
+
+- name: Unmask ssh.service (in case it was masked due to socket activation)
+  ansible.builtin.systemd:
+    name: ssh.service
+    masked: false
+
+- name: Ensure ssh.service is enabled (replaces socket activation)
+  ansible.builtin.systemd:
+    name: ssh.service
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: Set SSH port in sshd_config
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?Port "
+    line: "Port {{ bootstrap_ssh_port }}"
+    state: present
+    validate: /usr/sbin/sshd -t -f %s
+  notify: Restart sshd
+
+- name: Disable root login in sshd_config
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?PermitRootLogin "
+    line: "PermitRootLogin no"
+    state: present
+    validate: /usr/sbin/sshd -t -f %s
+  when: bootstrap_disable_root_login
+  notify: Restart sshd
+
+- name: Disable password authentication in sshd_config
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "^#?PasswordAuthentication "
+    line: "PasswordAuthentication no"
+    state: present
+    validate: /usr/sbin/sshd -t -f %s
+  when: bootstrap_disable_password_auth
+  notify: Restart sshd
+
+- name: Remove cloud-init SSH override (Ubuntu 24 specific)
+  ansible.builtin.file:
+    path: /etc/ssh/sshd_config.d/50-cloud-init.conf
+    state: absent
+  notify: Restart sshd
+
+- name: Force handlers (apply sshd restart immediately so we don't lose connection state)
+  ansible.builtin.meta: flush_handlers

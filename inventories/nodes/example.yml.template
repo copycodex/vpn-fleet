@@ -1,0 +1,61 @@
+# Пример ноды. Копируется wizard/server.py в <node>.yml.
+# Один файл = одна нода. Суффикс .template исключает пример из inventory.
+all:
+  hosts:
+    example:
+      ansible_host: 203.0.113.10          # public IP ноды
+      ansible_user: devops                # после bootstrap
+      ansible_port: 2424                  # системный SSH (после hardening)
+      ansible_ssh_private_key_file: ~/.ssh/id_ed25519
+
+      # --- во что нода превращается бутстрапом ---
+      # Объявлено ЗДЕСЬ, а не только дефолтами роли: playbooks/bootstrap.yml
+      # читает эти поля в pre_tasks, куда дефолты роли ещё не попадают.
+      bootstrap_user: devops              # кем ходим после бутстрапа
+      bootstrap_ssh_port: 2424            # порт после переезда = ansible_port выше
+
+      # ОДИН порт под тремя именами, и они обязаны совпадать:
+      #   bootstrap_ssh_port — куда бутстрап переносит sshd;
+      #   ansible_port       — чем ходит ansible после переезда;
+      #   ssh_port           — что пишет в sshd_config роль ssh_hardening и что
+      #                        открывает firewall (её дефолт — 2424).
+      # Разъедутся — make base вернёт sshd на чужой порт и закроет нас снаружи.
+      ssh_port: 2424
+
+      # --- node identity ---
+      node_name: example
+      node_location: "fra"                # для имён клиентов/тегов
+
+      # --- singbox role ---
+      # Xray owns Reality by default; use "singbox" only for legacy rollback.
+      singbox_reality_server: xray
+      singbox_reality_dest: "www.samsung.com"   # HTTPS-сайт с TLS 1.3 и h2, чей SNI не режут по пути
+      singbox_reality_sni: "www.samsung.com"
+      singbox_reality_port: 443                    # TCP
+      xray_version: "26.3.27"                     # explicit node release
+      xray_listen: 127.0.0.1                       # backend behind HAProxy
+      xray_listen_port: 1443
+      reality_frontend_enabled: true
+      singbox_hy2_enabled: true
+      singbox_hy2_port: 443                        # UDP (не конфликтует с TCP/443)
+      singbox_wg_exit_enabled: false               # WG-выход для стран без DPI
+      singbox_wg_exit_port: 51821                  # UDP, != infra mesh (51820)
+
+      # --- firewall: профиль edge ---
+      # Оба публичных списка обязательны. Если портов нет, объяви [] явно.
+      # SSH в списках нет: роль открывает его сама по ssh_port с rate-limit.
+      firewall_allowed_tcp_ports:
+        - {port: 443, comment: "VLESS Reality"}
+      firewall_allowed_udp_ports:
+        - {port: 443, comment: "Hysteria2"}
+
+      # Клиенты — ИМЕНА здесь, UUID в sops (node_<нода>_clients). Список и SOPS
+      # обязаны совпадать ровно, поэтому имена сюда дописывает не человек, а
+      # scripts/add-client.sh: он же кладёт UUID в шифротекст, атомарно и с
+      # откатом. Руками сюда имена не вписывают.
+      singbox_client_names:
+        - example-client
+
+      # Клиенты на App Store sing-box (схема 1.11): им экспорт делает отдельный
+      # legacy-конфиг. Пусто — все клиенты на актуальной схеме.
+      singbox_legacy_client_names: []

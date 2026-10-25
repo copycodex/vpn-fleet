@@ -1,0 +1,10 @@
+---
+- name: Check Reality topology before changing the node
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Check Reality configuration
+      ansible.builtin.import_role:
+        name: singbox
+        tasks_from: preflight
+      tags: [reality_preflight]

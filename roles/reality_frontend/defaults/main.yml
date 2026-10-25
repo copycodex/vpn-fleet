@@ -1,0 +1,10 @@
+---
+# TCP-фронт перед Reality. Existence rationale: на ноде с публичным listen'ом
+# xray Reality не поднимался — клиент получал invalid connection. На рабочей
+# За HAProxy та же версия Xray может принимать соединения.
+reality_frontend_enabled: false
+reality_frontend_bind_port: "{{ singbox_reality_port | default(443) }}"
+reality_frontend_backend_host: "{{ xray_listen | default('127.0.0.1') }}"
+reality_frontend_backend_port: "{{ xray_listen_port | default(1443) }}"
+# ClientHello может прийти не первым пакетом — даём haproxy его дождаться.
+reality_frontend_inspect_delay: "5s"

@@ -1,0 +1,9 @@
+---
+# Деплой management-WireGuard на ноду: адресация устройств (телефон-реле,
+# десктоп) поверх уже существующего VLESS/Hysteria2 туннеля. Порт наружу
+# не открывается — см. roles/wireguard/defaults/main.yml.
+- name: Deploy management WireGuard
+  hosts: all
+  become: true
+  roles:
+    - wireguard

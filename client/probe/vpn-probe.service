@@ -1,0 +1,11 @@
+[Unit]
+Description=Probe VPN transports and SSH access
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/vpn-probe
+
+[Install]
+WantedBy=default.target

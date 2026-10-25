@@ -1,0 +1,11 @@
+# Скопируй в terraform.tfvars (gitignored) и заполни.
+# Токен СЮДА НЕ кладём — export HCLOUD_TOKEN=... (provider читает из env).
+
+node_name      = "edge-01"
+server_type    = "cx23"    # cheapest €3.99/мес (x86); ARM = cax11 €4.49
+location       = "fsn1"    # EU: fsn1 / nbg1 / hel1
+image          = "ubuntu-24.04"
+node_role      = "edge-gateway"
+
+# Публичный ключ fleet-а: тот же, что в inventories/group_vars/all/ssh_keys.yml.
+ssh_public_key = "ssh-ed25519 AAAA... fleet-key"

@@ -1,0 +1,24 @@
+---
+- name: Exercise firewall reconciliation with synthetic inputs
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    firewall_allowed_tcp_ports:
+      - port: "{{ test_reality_port | int }}"
+        comment: VLESS Reality
+    firewall_allowed_tcp_ports_from: []
+    firewall_allowed_udp_ports: []
+    firewall_ssh_allow_from:
+      - 192.0.2.0/24
+    firewall_ssh_rate_limit: true
+    ssh_port: 2424
+  roles:
+    - firewall
+  tasks:
+    - name: Repeat firewall role in the same play when requested
+      ansible.builtin.include_role:
+        name: firewall
+      when: test_repeat_role | default(false) | bool

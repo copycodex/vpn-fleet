@@ -1,0 +1,35 @@
+---
+# Синтетический inventory для CI и локальной проверки: syntax-check, lint и
+# render идут по нему, а не по private/inventories. Ключа расшифровки в CI нет
+# и не должно быть — здесь нет ни одного секрета и ни одной живой координаты.
+# Адрес из документационного диапазона RFC 5737 (203.0.113.0/24).
+all:
+  hosts:
+    ci:
+      ansible_host: 203.0.113.11
+      ansible_user: devops
+      ansible_port: 2424
+      ansible_connection: local
+
+      node_name: ci
+      node_location: "ci"
+
+      singbox_reality_server: xray
+      singbox_reality_dest: "www.samsung.com"
+      singbox_reality_sni: "www.samsung.com"
+      singbox_reality_port: 443
+      xray_version: "26.3.27"
+      xray_listen: 127.0.0.1
+      xray_listen_port: 1443
+      reality_frontend_enabled: true
+      firewall_allowed_tcp_ports:
+        - {port: 443, comment: "VLESS Reality"}
+      firewall_allowed_udp_ports:
+        - {port: 443, comment: "Hysteria2"}
+      singbox_hy2_enabled: true
+      singbox_hy2_port: 443
+      singbox_wg_exit_enabled: false
+      singbox_wg_exit_port: 51821
+
+      singbox_client_names:
+        - ci-client

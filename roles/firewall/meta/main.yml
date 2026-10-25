@@ -1,0 +1,13 @@
+---
+# Локальная дивергенция от infra@d888464: SSH rate-limit использует ssh_port,
+# чтобы смена порта не закрыла единственный management endpoint. Backport: MR-5.
+galaxy_info:
+  role_name: firewall
+  author: vpn-fleet
+  description: UFW firewall configuration with provider-agnostic source IPs
+  license: MIT
+  min_ansible_version: "2.16"
+  platforms:
+    - name: Ubuntu
+      versions: [noble]
+dependencies: []

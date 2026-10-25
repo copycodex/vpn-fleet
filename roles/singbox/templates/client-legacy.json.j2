@@ -1,0 +1,86 @@
+{
+  "log": { "level": "warn" },
+  "dns": {
+    "servers": [
+      { "tag": "proxy-dns", "address": "https://1.1.1.1/dns-query", "detour": "proxy" },
+      { "tag": "local-dns", "address": "local", "detour": "direct" }
+    ],
+    "rules": [
+      { "ip_is_private": true, "server": "local-dns" }
+    ],
+    "final": "proxy-dns",
+    "strategy": "ipv4_only"
+  },
+  "inbounds": [
+    {
+      "type": "tun",
+      "tag": "tun-in",
+      "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+      "auto_route": true,
+      "strict_route": true,
+      "stack": "system"
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "selector",
+      "tag": "proxy",
+      "outbounds": ["auto", "vless-{{ singbox_vless_security }}"{% if singbox_hy2_enabled %}, "hy2"{% endif %}],
+      "default": "auto"
+    },
+    {
+      "type": "urltest",
+      "tag": "auto",
+      "outbounds": ["vless-{{ singbox_vless_security }}"{% if singbox_hy2_enabled %}, "hy2"{% endif %}],
+{# Keep this URL IP-based: proxy DNS itself depends on the selected outbound. #}
+      "url": "https://1.1.1.1/cdn-cgi/trace",
+      "interval": "10m",
+      "tolerance": 300
+    },
+    {
+      "type": "vless",
+      "tag": "vless-{{ singbox_vless_security }}",
+      "server": "{{ ansible_host }}",
+      "server_port": {{ singbox_reality_port }},
+      "uuid": "{{ export_client.uuid }}",
+      "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true,
+        "server_name": "{{ singbox_vless_tls_server_name if singbox_vless_security == 'tls' else singbox_reality_sni }}"{% if singbox_vless_security == 'reality' %},
+{# Xray accepts the browser-shaped ClientHello; a sing-box Reality server
+   needs randomized because it cannot parse the ML-KEM keyshare. #}
+        "utls": { "enabled": true, "fingerprint": "{{ singbox_reality_fingerprints[singbox_reality_server] }}" },
+        "reality": {
+          "enabled": true,
+          "public_key": "{{ node_reality_public_key }}",
+          "short_id": "{{ node_reality_short_id }}"
+        }
+{% endif %}
+      }
+    }{% if singbox_hy2_enabled %},
+    {
+      "type": "hysteria2",
+      "tag": "hy2",
+      "server": "{{ ansible_host }}",
+      "server_port": {{ singbox_hy2_port }},
+      "password": "{{ node_hy2_password }}",
+      "tls": {
+        "enabled": true,
+        "server_name": "{{ singbox_hy2_sni }}",
+        "certificate": {{ node_hy2_certificate | to_json }},
+        "alpn": ["h3"]
+      }
+    }{% endif %},
+    { "type": "direct", "tag": "direct" }
+  ],
+  "route": {
+    "rules": [
+      { "action": "sniff" },
+      { "protocol": "dns", "action": "hijack-dns" },
+      { "ip_cidr": ["{{ node_bypass_cidr }}"], "outbound": "direct" },
+      { "ip_is_private": true, "outbound": "direct" }
+    ],
+    "final": "proxy",
+    "auto_detect_interface": true
+  }
+}

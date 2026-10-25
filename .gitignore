@@ -1,19 +1,43 @@
-# Ansible secrets
-.vault_pass.txt
-*.vault.yml
+# .export-public.manifest здесь НЕ игнорируется: в этом репозитории он не
+# артефакт сборки, а provenance поставки — checksums исходного экспорта.
 
-# Python cache
+# Secrets / decrypted
+*.decrypted
+*.decrypted.*
+.env
+.vault_pass.txt
+keys.txt
+*.age
+*.pem
+*.key
+# Расшифрованные копии частных секретов рядом с шифротекстом
+private/**/*.yml.dec
+private/**/*.plain
+
+# Generated client configs (contain UUIDs)
+clients/*
+!clients/.gitkeep
+# Обезличенные примеры выпускаемых конфигов: форма без чьих-либо координат.
+# Реальные выпуски рядом остаются ignored.
+!clients/example-*
+
+# Ansible
+*.retry
+/.ansible/
 __pycache__/
 *.pyc
+.ansible_cache/
 
-# dotenv files with real secrets
-.env
+# Terraform
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+.terraform/
+crash.log
 
-# Editor/IDE stuff
-.vscode/
+# Editor / OS
 .idea/
-
-# OS files
+.vscode/
 .DS_Store
 Thumbs.db
-playbooks/exports

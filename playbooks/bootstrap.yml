@@ -1,0 +1,169 @@
+---
+# One-time bootstrap: дверь первого входа → devops@2424, базовые пакеты, sudo,
+# ssh.socket fix (Ubuntu 24), отключение root-логина и парольной аутентификации.
+# Запускать ОДИН РАЗ на свежей ноде. Роль bootstrap — copy из infra@d888464.
+#
+# ДВЕРЬ ОТКРЫВАЕТ НЕ ЭТОТ ПЛЕЙБУК. Её открывает `make first-contact NODE=<node>`:
+# он ведёт PTY-диалог смены пароля, кладёт публичный ключ парка пользователю
+# первого входа и доказывает вход этим ключом отдельным соединением. Поэтому
+# здесь нет ни пароля, ни `--ask-pass`: авторизация всегда ключом парка, как и
+# везде. ansible.cfg уже держит PreferredAuthentications=publickey, known_hosts
+# парка и StrictHostKeyChecking=yes — переопределять в этом плейбуке нечего.
+#
+# Прежняя шапка объявляла парольный вход «непригодным принципиально (пароль
+# выдан просроченным, PAM требует TTY)» и ставила fail с отсылкой к runbook.
+# Посылка неверна — PAM требует TTY, а не человека, — и первый вход ведёт этот
+# диалог командой. Вместе с ней ушли переменные bootstrap_from_user,
+# bootstrap_from_port и node_<node>_bootstrap_password: их больше нет ни в
+# инвентаре, ни в SOPS, и читать их здесь было нечем.
+#
+# КАКУЮ ДВЕРЬ БРАТЬ. После успешного first-contact запись ноды в first_entry
+# удалена — это его инвариант, — поэтому пользователь и порт свежей ноды
+# передаются вызовом:
+#     make bootstrap NODE=<node> FROM=<user>@<port>
+# Без FROM берётся steady-state ноды (bootstrap_user@bootstrap_ssh_port): это
+# повторный прогон на уже пробутстрапленной ноде, он обязан быть идемпотентным.
+- name: Bootstrap fresh node (first-contact door -> devops@2424)
+  hosts: all
+  gather_facts: false
+  become: true
+  vars:
+    # FROM из Makefile приходит сюда как bootstrap_door_*; steady-state объявлен
+    # файлом ноды (private/inventories/nodes/<node>.yml, блок «бутстрап»).
+    ansible_user: "{{ bootstrap_door_user | default(bootstrap_user) }}"
+    ansible_port: "{{ bootstrap_door_port | default(bootstrap_ssh_port) }}"
+    bootstrap_known_hosts_file: >-
+      {{ playbook_dir }}/../private/inventories/known_hosts
+
+  pre_tasks:
+    # Грабля 148, применённая к двери: отсутствие обязано быть отказом с
+    # причиной, а не невнятным Permission denied посреди прогона.
+    - name: Assert the fleet key opens the declared door before anything else
+      ansible.builtin.wait_for_connection:
+        timeout: 90
+      register: _door
+      ignore_errors: true
+
+    - name: Explain the closed door instead of failing obscurely
+      ansible.builtin.fail:
+        msg: >-
+          Нода не открывается ключом {{ ansible_ssh_private_key_file }} под
+          {{ ansible_user }}:{{ ansible_port }}. Дверь свежей ноды открывает
+          «make first-contact NODE={{ inventory_hostname }}»; если он уже
+          отработал, назови оставленную им дверь явно:
+          «make bootstrap NODE={{ inventory_hostname }} FROM=<user>@<port>».
+      when: _door is failed
+
+    # Дверь может быть и непривилегированной (так отдают AWS, GCP, Oracle, DO).
+    # Бутстрап меняет sshd и заводит пользователя, поэтому root нужен ему сразу,
+    # а не на середине прогона.
+    - name: Prove the door user reaches root through become
+      ansible.builtin.command: id -u
+      changed_when: false
+      register: _root
+      ignore_errors: true
+
+    - name: Explain a door without root instead of failing mid-run
+      ansible.builtin.fail:
+        msg: >-
+          Пользователь {{ ansible_user }} не получает root через become:
+          нужен sudo без пароля. Бутстрап правит sshd и заводит
+          «{{ bootstrap_user }}» — начинать его с двери без root нельзя.
+      when: _root is failed or (_root.stdout | default('') | trim) != '0'
+
+  roles:
+    - bootstrap
+
+  post_tasks:
+    # Роль уже выполнила flush_handlers: только теперь новый порт обязан
+    # отвечать. Это не второй TOFU. Ключ двери уже принят first-contact, и
+    # полученный с steady-state порта ключ сначала должен совпасть с ним.
+    - name: Build known_hosts tokens for the door and steady-state ports
+      ansible.builtin.set_fact:
+        _bootstrap_door_host_token: >-
+          {{ ansible_host if (ansible_port | int) == 22 else
+             '[' ~ ansible_host ~ ']:' ~ (ansible_port | string) }}
+        _bootstrap_steady_host_token: >-
+          {{ ansible_host if (bootstrap_ssh_port | int) == 22 else
+             '[' ~ ansible_host ~ ']:' ~ (bootstrap_ssh_port | string) }}
+      no_log: true
+      tags: [bootstrap-known-hosts]
+
+    - name: Read the host keys already accepted for the bootstrap door
+      ansible.builtin.command:
+        argv:
+          - python3
+          - "{{ playbook_dir }}/../scripts/first-contact.py"
+          - "{{ inventory_hostname }}"
+          - --owned-known-hosts
+          - door
+          - --known-hosts-file
+          - "{{ bootstrap_known_hosts_file }}"
+      delegate_to: localhost
+      become: false
+      register: _bootstrap_known_door
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [bootstrap-known-hosts]
+
+    - name: Obtain the host keys from the steady-state port
+      ansible.builtin.command:
+        argv:
+          - ssh-keyscan
+          - -T
+          - "10"
+          - -p
+          - "{{ bootstrap_ssh_port | string }}"
+          - "{{ ansible_host }}"
+      delegate_to: localhost
+      become: false
+      register: _bootstrap_scanned_steady
+      changed_when: false
+      failed_when: false
+      no_log: true
+      tags: [bootstrap-known-hosts]
+
+    - name: Normalize known and obtained host keys without their port tokens
+      ansible.builtin.set_fact:
+        _bootstrap_known_door_keys: >-
+          {{ _bootstrap_known_door.stdout |
+             regex_findall('(?m)^' ~ (_bootstrap_door_host_token | regex_escape) ~
+             '[ \t]+([^ \t\r\n]+)[ \t]+([^ \t\r\n]+)[ \t]+vpn-fleet:' ~ inventory_hostname ~ ':door$') |
+             map('join', ' ') | unique | sort | list }}
+        _bootstrap_scanned_steady_keys: >-
+          {{ _bootstrap_scanned_steady.stdout |
+             regex_findall('(?m)^' ~ (_bootstrap_steady_host_token | regex_escape) ~
+             '[ \t]+([^ \t\r\n]+)[ \t]+([^ \t\r\n]+)(?:[ \t].*)?$') |
+             map('join', ' ') | unique | sort | list }}
+        _bootstrap_scanned_steady_lines: >-
+          {{ _bootstrap_scanned_steady.stdout_lines |
+             select('match', '^' ~ (_bootstrap_steady_host_token | regex_escape) ~
+             '[ \t]+') | unique | sort | list }}
+      no_log: true
+      tags: [bootstrap-known-hosts]
+
+    - name: Refuse an unproven or changed host key before editing known_hosts
+      ansible.builtin.assert:
+        that:
+          - _bootstrap_known_door_keys | length > 0
+          - _bootstrap_scanned_steady_keys | length > 0
+          - _bootstrap_scanned_steady_keys == _bootstrap_known_door_keys
+        fail_msg: >-
+          Host key steady-state порта не совпадает с уже принятым ключом
+          двери (либо одна из записей не получена); known_hosts не изменён.
+        quiet: true
+      no_log: true
+      tags: [bootstrap-known-hosts]
+
+    - name: Record the proven host keys for the steady-state port
+      ansible.builtin.lineinfile:
+        path: "{{ bootstrap_known_hosts_file }}"
+        line: "{{ item }} vpn-fleet:{{ inventory_hostname }}:steady"
+        state: present
+        create: false
+      loop: "{{ _bootstrap_scanned_steady_lines }}"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      tags: [bootstrap-known-hosts]

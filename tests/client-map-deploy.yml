@@ -1,0 +1,10 @@
+---
+# The deployment role's secret-loading entry point, isolated from node writes.
+- name: Exercise the singbox deployment secret map on synthetic localhost
+  hosts: all
+  gather_facts: false
+  tasks:
+    - name: Load clients through the deployment role
+      ansible.builtin.include_role:
+        name: singbox
+        tasks_from: secrets_map

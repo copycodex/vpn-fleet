@@ -1,72 +1,37 @@
-# Xray Ansible Setup
+# vpn-fleet 2.0
 
-## 1. Покупаем сервер
-Берём VPS (рекомендуется Ubuntu 22.04/24.04).
+An Ansible toolkit for running a small VPN fleet. A node serves VLESS with Reality through Xray and Hysteria2 through sing-box. Linux clients use sing-box in TUN mode; a Windows bundle and client export tools are also included.
 
-Проверяем, что открыты порты:
-- `22` — SSH
-- `80` — HTTP
-- `443` — HTTPS
+Version 1.0 was the earlier Xray-only implementation, without sing-box or Hysteria2, and remains available at the `v1.0` tag.
 
----
+## Repository map
 
-## 2. Настраиваем домен
-- Регистрируем бесплатный домен на [DuckDNS](https://www.duckdns.org/).
-- Прописываем A-запись на IP вашего сервера  
-  (например: `copycodex.duckdns.org → xx.xxx.xx.xx`).
+| Path | Purpose |
+|---|---|
+| `roles/`, `playbooks/` | Provision, harden, and deploy nodes |
+| `wizard/` | Guided setup and lifecycle commands |
+| `inventories/` | Templates and examples for your inventory |
+| `client/` | Linux and Windows client tooling |
+| `tests/` | Synthetic tests and configuration render checks |
+| `terraform/` | Optional Hetzner provisioning |
 
----
+## Start your own fleet
 
-## 3. Ставим Ansible себе на комп
-```bash
-sudo apt update && sudo apt install -y ansible
-ansible --version
-```
-
----
-
-## 4. Создаём и заполняем .env `.env.example` → `.env`:
-Заходим в корень проекта и делаем или просто копируем руками
-```bash
-cp .env.example .env
-```
-В .env вписываем:
-
-- IP и данные root для первого входа
-- данные нового пользователя (SSH порт, логин, ключ, sudo-пароль)
-- домен (например: copycodex.duckdns.org)
-
-Каждый раз перед использованием Ansible загружаем переменные:
+Use a Linux control host and a VPS running Ubuntu. Install the tools listed in `requirements-ci.txt` and the collections in `requirements.yml`. The guided route starts with:
 
 ```bash
-set -a; source .env; set +a
+wizard/deps.sh
+wizard/keys.sh
+wizard/private_tree.py
+wizard/wizard.py
 ```
 
-## 5. Разворачиваем инфраструктуру
+Create your own `private/` tree from the templates. It holds your inventory, host keys, public administrator keys, SOPS configuration, and encrypted secrets. No operational `private/` tree is included here. Keep the age identity and SSH private key outside the repository.
 
-- Сперва необходимо сделать инишиал сетап (с закрытием 22 порта)
-```bash
-make init-close-22
+For individual commands, the usual sequence is `make new-server`, `make first-contact NODE=<node>`, `make bootstrap NODE=<node> FROM=<user>@<port>`, `make site NODE=<node>`, and `make export NODE=<node>`. Read the expected result and prerequisites for each step in the [English guide](GUIDE.md) or [Russian guide](GUIDE_RU.md) before running it. The wizard walks through the same sequence.
 
-```
-Первый шаг может висеть долго - обновления штука не быстрая.
+`make test` runs local tests and configuration checks. Deployment and client switching change live network state; perform those steps from a session where you can recover access.
 
-- Затем делаем установку траефаки и xray
+## License
 
-```bash
-make stack
-```
-
-## 6. Добавляем пользователя
-
-```bash
-make xray-add-client NAME=copycodex
-```
-
-## 7. Выгружаем все конфиги (опционально - после создания в консоле появляется ссылка)
-
-```bash
-make export-clients
-```
-
-## 8. Добавляем конфиг в XRAY клиент. 
+[MIT](LICENSE).

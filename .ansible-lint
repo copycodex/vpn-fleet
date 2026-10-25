@@ -1,0 +1,8 @@
+---
+profile: min
+exclude_paths:
+  - .ansible/
+  - clients/
+  - private/inventories/group_vars/all/secrets.sops.yml
+  - terraform/.terraform/
+  - .cache/

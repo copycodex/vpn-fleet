@@ -1,0 +1,12 @@
+---
+- name: restart singbox
+  ansible.builtin.systemd:
+    name: "{{ singbox_service }}"
+    state: restarted
+    daemon_reload: true
+
+- name: restart xray
+  ansible.builtin.systemd:
+    name: "{{ xray_service }}"
+    state: restarted
+    daemon_reload: true

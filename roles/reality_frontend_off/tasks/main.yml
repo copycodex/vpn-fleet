@@ -1,0 +1,10 @@
+---
+- name: Узнать, установлен ли прежний HAProxy-фронт
+  ansible.builtin.service_facts:
+
+- name: Остановить и отключить прежний HAProxy-фронт
+  ansible.builtin.service:
+    name: haproxy
+    state: stopped
+    enabled: false
+  when: "'haproxy.service' in ansible_facts.services or 'haproxy' in ansible_facts.services"
